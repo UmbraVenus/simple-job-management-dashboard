@@ -1,0 +1,78 @@
+# The application stack. No host ports are published here: `make up` adds them
+# from docker-compose.override.yml (loaded automatically), while `make test`
+# loads only this file, so a busy port on the host cannot fail the tests.
+name: job-dashboard
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jobs}
+      POSTGRES_USER: ${POSTGRES_USER:-jobs}
+      # Development default. The database is reachable only inside the compose
+      # network; a real deployment supplies its own value.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobs}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 checks over TCP. On first start the image runs a temporary
+      # server on the unix socket only; a socket check would pass too early.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build: ./backend
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jobs}
+      POSTGRES_USER: ${POSTGRES_USER:-jobs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobs}
+      POSTGRES_HOST: db
+      # Any Host header is accepted so the app also works when opened by IP or
+      # hostname on a remote machine. Acceptable only because nothing here
+      # builds emails, caches responses or authenticates users. settings.py
+      # keeps a strict default for anything not started through this file.
+      # TODO: before adding auth, set this to the real hostname(s).
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-insecure-dev-only-key}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # The slim Python image has no curl, so the check uses Python itself.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Playwright runner. Behind a profile so `make up` never builds or starts it.
+  e2e:
+    profiles: [e2e]
+    build: ./e2e
+    environment:
+      BASE_URL: http://frontend
+    depends_on:
+      frontend:
+        condition: service_healthy
+    # Chromium needs more shared memory than Docker's 64 MB default, and an
+    # init process to reap the helper processes it spawns.
+    shm_size: 1gb
+    init: true
+    # TODO: traces of failed tests stay inside the container and are removed
+    # with it. Deferred: a bind mount would leave root-owned files in the clone
+    # on Linux. Fix: `docker compose cp` the test-results folder out on failure.
+
+volumes:
+  db-data:

@@ -1,0 +1,6 @@
+# Local-run additions, merged automatically by `docker compose` / `make up`.
+# Not used by `make test`.
+services:
+  frontend:
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"

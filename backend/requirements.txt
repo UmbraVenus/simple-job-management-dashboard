@@ -1,0 +1,9 @@
+# Exact pins (direct + transitive) so every build installs the same versions.
+Django==5.2.18
+gunicorn==26.2.0
+psycopg[binary]==3.3.6
+
+# Transitive
+asgiref==3.12.1
+psycopg-binary==3.3.6
+sqlparse==0.6.0

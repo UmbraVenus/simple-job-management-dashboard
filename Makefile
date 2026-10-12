@@ -10,11 +10,14 @@ COMPOSE := docker compose
 # volume) built from the base file only, so it publishes no host ports and
 # never touches the data of a running `make up` stack.
 TEST_COMPOSE := docker compose -p job-dashboard-test -f docker-compose.yml --profile e2e
+# Backend unit tests get a third project: own database container and volume,
+# so they can run next to `make up` or `make test` without sharing any state.
+BACKEND_TEST_COMPOSE := docker compose -p job-dashboard-backend-test -f docker-compose.yml -f docker-compose.backend-test.yml
 
-.PHONY: help build up test stop clean
+.PHONY: help build up test test-backend stop clean
 
 help: ## Show this help
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  make %-8s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  make %-13s %s\n", $$1, $$2}'
 
 build: ## Build the Docker images
 	$(COMPOSE) build
@@ -35,9 +38,19 @@ test: ## Run the Playwright E2E tests against a fresh, isolated stack
 	{ $(TEST_COMPOSE) up -d --wait db backend frontend || { dump_logs; exit 1; }; } && \
 	{ $(TEST_COMPOSE) run --rm -T e2e || { status=$$?; dump_logs; exit $$status; }; }
 
+# Same shape as `test`: clean leftovers, build, run, always tear down, exit with
+# the pytest exit code. `run` starts db (and waits for its healthcheck) through
+# depends_on; the backend and frontend services are never started.
+test-backend: ## Run the backend unit tests (pytest) against a throwaway Postgres
+	@trap '$(BACKEND_TEST_COMPOSE) down -v --remove-orphans' EXIT; \
+	$(BACKEND_TEST_COMPOSE) down -v --remove-orphans && \
+	$(BACKEND_TEST_COMPOSE) build backend-test && \
+	$(BACKEND_TEST_COMPOSE) run --rm -T backend-test
+
 stop: ## Stop the running containers (data is kept)
 	$(COMPOSE) stop
 
 clean: ## Remove containers, networks and volumes of the app and test stacks
 	$(COMPOSE) down -v --remove-orphans
 	$(TEST_COMPOSE) down -v --remove-orphans
+	$(BACKEND_TEST_COMPOSE) down -v --remove-orphans

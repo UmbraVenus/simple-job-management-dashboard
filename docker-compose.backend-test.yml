@@ -1,0 +1,18 @@
+# Backend unit-test runner. Loaded only by `make test-backend`, on top of
+# docker-compose.yml; `make up` and `make test` never read this file.
+services:
+  backend-test:
+    build:
+      context: ./backend
+      target: test
+    environment:
+      # pytest-django creates and drops its own database (test_<POSTGRES_DB>)
+      # on this server; the application database is never touched.
+      POSTGRES_DB: ${POSTGRES_DB:-jobs}
+      POSTGRES_USER: ${POSTGRES_USER:-jobs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobs}
+      POSTGRES_HOST: db
+      DJANGO_SECRET_KEY: insecure-test-only-key
+    depends_on:
+      db:
+        condition: service_healthy

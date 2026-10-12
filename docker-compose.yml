@@ -23,7 +23,10 @@ services:
       retries: 30
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      # Named explicitly: the Dockerfile also has a `test` stage.
+      target: runtime
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-jobs}
       POSTGRES_USER: ${POSTGRES_USER:-jobs}

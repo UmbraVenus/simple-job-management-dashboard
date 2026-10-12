@@ -10,10 +10,18 @@ from django.db import IntegrityError, transaction
 from jobs.models import JOB_NAME_UNIQUE_CONSTRAINT, Job, JobStatus, StatusType
 
 # TODO: nothing here is logged; the gunicorn access log only shows the request.
-#  Deferred: no logging setup exists yet. Fix: logger.info on a refused
-#  duplicate name and on each status change.
+#  Deferred: the access log is enough for the brief. Fix: logger.info on a
+#  refused duplicate name and on each status change.
 
 _NAME_MAX_LENGTH: int = Job._meta.get_field("name").max_length
+
+
+class InvalidJobInput(ValueError):
+    """A name or status the caller passed is not acceptable.
+
+    A ``ValueError``, so callers may catch either; the API catches only this
+    class, so a ``ValueError`` raised by a bug is not reported as bad input.
+    """
 
 
 class DuplicateJobName(Exception):
@@ -25,8 +33,8 @@ def create_job(name: str) -> Job:
 
     :param name: The job's name; surrounding whitespace is removed.
     :returns: The saved job.
-    :raises ValueError: If the name is not a string, is blank, contains a NUL
-        character or is longer than the column allows.
+    :raises InvalidJobInput: If the name is not a string, is blank, contains a NUL
+        character or a lone surrogate, or is longer than the column allows.
     :raises DuplicateJobName: If another job already has this name.
     """
     name = _clean_name(name)
@@ -53,7 +61,7 @@ def change_status(job_id: int, status: str) -> Job:
     :param job_id: The id of the job to change.
     :param status: One of the ``StatusType`` values.
     :returns: The job, carrying the new ``current_status`` and ``updated_at``.
-    :raises ValueError: If the status is not one of the ``StatusType`` values.
+    :raises InvalidJobInput: If the status is not one of the ``StatusType`` values.
     :raises Job.DoesNotExist: If no job has this id.
     """
     new_status = _clean_status(status)
@@ -84,6 +92,7 @@ def _lock_job(job_id: int) -> Job:
     """Read a job and hold its row lock until the surrounding transaction ends.
 
     Writers to the same job queue up here, so they run one after another.
+    The wait has no time limit (see the TODO at ``DATABASES`` in settings.py).
 
     :param job_id: The id of the job to lock.
     :returns: The job as it is once the lock is held.
@@ -96,18 +105,28 @@ def _clean_name(name: str) -> str:
     """
     :param name: The name as the caller passed it.
     :returns: The name without surrounding whitespace.
-    :raises ValueError: If the name is not a string, is blank, contains a NUL
-        character or is longer than the column allows.
+    :raises InvalidJobInput: If the name is not a string, is blank, contains a NUL
+        character or a lone surrogate, or is longer than the column allows.
     """
     if not isinstance(name, str):
-        raise ValueError("Job name must be a string.")
+        raise InvalidJobInput("Job name must be a string.")
     if "\x00" in name:
-        raise ValueError("Job name must not contain a NUL character.")
+        raise InvalidJobInput("Job name must not contain a NUL character.")
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        # Half of a surrogate pair: Python holds it, the database cannot.
+        raise InvalidJobInput("Job name must be valid Unicode text.") from None
+    # TODO: characters that draw nothing (zero-width space, direction marks)
+    #  count as text, and names are not Unicode-normalised, so a name can look
+    #  blank and two names can look the same. Deferred: the brief asks only for
+    #  a non-empty string. Fix: unicodedata.normalize("NFC", name) and refuse
+    #  the "Cf" and "Cc" categories, here and in JobCreateSerializer.
     name = name.strip()
     if not name:
-        raise ValueError("Job name must not be blank.")
+        raise InvalidJobInput("Job name must not be blank.")
     if len(name) > _NAME_MAX_LENGTH:
-        raise ValueError(f"Job name must be at most {_NAME_MAX_LENGTH} characters.")
+        raise InvalidJobInput(f"Job name must be at most {_NAME_MAX_LENGTH} characters.")
     return name
 
 
@@ -115,12 +134,12 @@ def _clean_status(status: str) -> StatusType:
     """
     :param status: The status as the caller passed it.
     :returns: The matching ``StatusType`` member.
-    :raises ValueError: If the status is not one of the ``StatusType`` values.
+    :raises InvalidJobInput: If the status is not one of the ``StatusType`` values.
     """
     try:
         return StatusType(status)
     except ValueError:
-        raise ValueError(f"Status must be one of: {', '.join(StatusType.values)}.") from None
+        raise InvalidJobInput(f"Status must be one of: {', '.join(StatusType.values)}.") from None
 
 
 def _violated_constraint(exc: IntegrityError) -> str | None:

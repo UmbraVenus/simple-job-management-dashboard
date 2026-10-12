@@ -36,11 +36,15 @@ DEBUG = env_bool("DJANGO_DEBUG", False)
 
 # nginx forwards the browser's Host header, so the service name `frontend` must
 # be allowed: inside the compose network the E2E browser calls http://frontend.
-# Strict by default; docker-compose.yml relaxes it to "*" for local runs.
+# Strict by default; docker-compose.yml relaxes it to "*" so the app can be
+# opened by IP on a remote machine. With no login, this check is what stops a
+# web page that re-points its DNS at this machine (DNS rebinding) from using
+# the API as if it were the app's own page; compose accepts that risk.
 # TODO: no authentication or authorization. Anyone who can reach the app can
 # create, change and delete jobs. Deferred: not in the brief. Fix: DRF
-# authentication + permission classes, an owner FK on Job, and ALLOWED_HOSTS
-# set to the real hostname(s).
+# authentication + permission classes (which need django.contrib.auth and
+# django.contrib.contenttypes back in INSTALLED_APPS, and UNAUTHENTICATED_USER
+# removed below), and an owner FK on Job.
 ALLOWED_HOSTS = [
     *env_list("DJANGO_ALLOWED_HOSTS", "localhost,[::1],frontend"),
     # Always allowed: the container healthcheck calls http://127.0.0.1:8000, so
@@ -48,11 +52,36 @@ ALLOWED_HOSTS = [
     "127.0.0.1",
 ]
 
+# No django.contrib.auth: there are no users, so its tables would sit empty.
 INSTALLED_APPS = [
-    "django.contrib.contenttypes",
-    "django.contrib.auth",
+    "rest_framework",
     "jobs",
 ]
+
+REST_FRAMEWORK = {
+    # JSON out only: no browsable HTML API.
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    # JSON in only. A form or text/plain POST is one a browser sends to another
+    # origin without asking first (no CORS preflight), so with no login any web
+    # page could create jobs here. Such a body now gets a 415.
+    # jobs.parsers adds a 400 for JSON nested too deeply to decode.
+    "DEFAULT_PARSER_CLASSES": ["jobs.parsers.JSONParser"],
+    # No authentication (see the TODO at ALLOWED_HOSTS); stated, not implied.
+    "DEFAULT_AUTHENTICATION_CLASSES": [],
+    "DEFAULT_PERMISSION_CLASSES": [],
+    # request.user is None; the default (AnonymousUser) needs django.contrib.auth.
+    "UNAUTHENTICATED_USER": None,
+    # OPTIONS answers 405. DRF's default describes the endpoint from the output
+    # serializer, which lists fields a POST cannot set and leaves out `name`.
+    "DEFAULT_METADATA_CLASS": None,
+    # TODO: no request-size or rate limit of its own. DRF reads the body
+    #  straight from the socket, so DATA_UPLOAD_MAX_MEMORY_SIZE does not apply;
+    #  the only cap is nginx's default client_max_body_size (1 MB). Deferred:
+    #  nothing to key a rate on without users. Fix: client_max_body_size on
+    #  /api/ in nginx.conf, and DEFAULT_THROTTLE_CLASSES once auth exists.
+    "EXCEPTION_HANDLER": "jobs.exceptions.exception_handler",
+    "TEST_REQUEST_DEFAULT_FORMAT": "json",
+}
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -62,6 +91,11 @@ MIDDLEWARE = [
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
+# TODO: no lock_timeout or statement_timeout. A request waiting for a job's row
+#  lock (services._lock_job) waits until gunicorn kills its worker after 30 s;
+#  three of them occupy every worker. Deferred: every transaction here is
+#  short and nothing else writes to the database. Fix: "OPTIONS": {"options":
+#  "-c lock_timeout=5s -c statement_timeout=15s"}, and answer 503 on a timeout.
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",

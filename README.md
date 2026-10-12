@@ -9,9 +9,10 @@
   the app can create, update and delete jobs. Run it only on a machine or network you trust.
 - **Host header checking is relaxed for local runs.** `docker-compose.yml` sets
   `DJANGO_ALLOWED_HOSTS=*` so the app works when opened by IP or hostname, for example on a remote
-  VM. Django's host check protects against forged absolute URLs (password-reset emails, shared
-  caches); this app has neither, so the check protects nothing here yet. `settings.py` keeps a
-  strict default. To restrict it: `DJANGO_ALLOWED_HOSTS=example.com make up`.
+  VM. The accepted risk is DNS rebinding: with no login, a web page on another site could re-point
+  its DNS at your machine and use the API as if it were the app's own page. It is small here (a
+  demo database, and the port is open to the network anyway). `settings.py` keeps a strict default.
+  To tighten it: `DJANGO_ALLOWED_HOSTS=localhost make up`.
 - **`make up` publishes port 8080 on all network interfaces**, so the app is reachable from other
   machines on the same network.
 

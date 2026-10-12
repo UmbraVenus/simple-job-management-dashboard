@@ -53,6 +53,7 @@ class Job(models.Model):
             # LIKE index that nothing here uses.
             # TODO: "Job" and "job" count as two names. Deferred: exact match
             #  is enough to stop a retry. Fix: a unique index on Lower("name").
+            #  Look-alike names (invisible characters): TODO in services._clean_name.
             models.UniqueConstraint(fields=["name"], name=JOB_NAME_UNIQUE_CONSTRAINT),
         ]
         # TODO: no (current_status, -id) index. Deferred: nothing filters by

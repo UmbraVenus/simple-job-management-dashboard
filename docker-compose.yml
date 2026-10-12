@@ -32,10 +32,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-jobs}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobs}
       POSTGRES_HOST: db
-      # Any Host header is accepted so the app also works when opened by IP or
-      # hostname on a remote machine. Acceptable only because nothing here
-      # builds emails, caches responses or authenticates users. settings.py
-      # keeps a strict default for anything not started through this file.
+      # Any Host header is accepted, so the app also works when opened by IP or
+      # hostname on a remote machine. Accepted risk: with no login, the Host
+      # check is the defence against DNS rebinding (a web page re-pointing its
+      # DNS at this machine and calling the API as if it were the app's own
+      # page). Small here: a demo database, and port 8080 is open to the
+      # network anyway. settings.py keeps a strict default for anything not
+      # started through this file. To tighten: DJANGO_ALLOWED_HOSTS=localhost make up
       # TODO: before adding auth, set this to the real hostname(s).
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-insecure-dev-only-key}

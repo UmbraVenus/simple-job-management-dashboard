@@ -8,6 +8,10 @@ from django.db import models
 from django.utils import timezone
 
 
+# Named here because services.py recognises a duplicate name by this constraint.
+JOB_NAME_UNIQUE_CONSTRAINT = "job_name_unique"
+
+
 class StatusType(models.TextChoices):
     """The states a job can be in. Shared by ``Job`` and ``JobStatus``."""
 
@@ -44,6 +48,12 @@ class Job(models.Model):
                 condition=models.Q(name__regex=r"\S"),
                 name="job_name_not_blank",
             ),
+            # A retried create cannot make a second job. A named constraint
+            # rather than unique=True, which on a CharField also builds a
+            # LIKE index that nothing here uses.
+            # TODO: "Job" and "job" count as two names. Deferred: exact match
+            #  is enough to stop a retry. Fix: a unique index on Lower("name").
+            models.UniqueConstraint(fields=["name"], name=JOB_NAME_UNIQUE_CONSTRAINT),
         ]
         # TODO: no (current_status, -id) index. Deferred: nothing filters by
         #  status yet and every index slows writes. Fix: add it together with

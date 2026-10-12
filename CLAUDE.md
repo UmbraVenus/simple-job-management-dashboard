@@ -27,7 +27,8 @@ writeup + AI transcript link. Be able to walk through and extend every line.
 
 ## Scope
 
-Core requirements 1-5 of the brief + one stretch goal: backend unit tests. Nothing else is built.
+Core requirements 1-5 of the brief + one stretch goal (backend unit tests) + one addition the
+author chose: job names are unique. Nothing else is built.
 
 Not built now (design notes at the bottom): status history view, filter/sort, job details page,
 frontend unit tests, auth, job rename, page-size selector, perf benchmark harness.
@@ -76,11 +77,13 @@ The 4 hours is a guideline; the author decides any cuts.
 | Delete cascade | `on_delete=CASCADE`, carried out by Django. The FK has no `ON DELETE` clause (Django 5.2 cannot declare one). | Spec is met through the API; a raw SQL delete of a job with statuses fails loudly instead of orphaning rows. `TODO` on the FK. |
 | DB check constraints | `job_current_status_valid`, `jobstatus_status_type_valid`, `job_name_not_blank` (at least one non-whitespace character) | `choices` and `blank=False` are not enforced by `save()` or raw SQL (the Phase 4 seed). Serializers still give the friendly 400. |
 | "Latest" status | Newest `JobStatus` = highest `id`, not latest `timestamp` | `timestamp` is a writable column; ids are assigned in insert order and `change_status` serializes inserts per job with a row lock. |
+| Service validation | `services.py` validates its own input: `ValueError` for a bad name or status, `Job.DoesNotExist` for an unknown id. Serializers repeat the rules. | Services stay correct for any caller (shell, management command), not only behind the API; bad input never reaches the database as an `IntegrityError`. |
 | API layer | Django REST Framework | Industry default: serializers, viewsets, cursor pagination. |
 | Frontend serving | Multi-stage build; nginx serves static files and proxies `/api` to gunicorn | Production-shaped, single origin, no CORS config. |
 | Data fetching | TanStack Query | Invalidate-after-mutation makes "UI updates dynamically" correct and small. |
 | Ordering | `-id` (newest first) | Primary-key index, unique (cursor pagination requires it), no extra index. |
 | PATCH contract | Body `{"status_type": "<STATE>"}`, required. Any state to any state, including the current one; every PATCH appends a `JobStatus` row. | Spec-literal. Not idempotent by design; note in README. |
+| Unique job name | `UniqueConstraint` `job_name_unique` on `Job.name`; `create_job` raises `DuplicateJobName`, the API answers 409. Exact match after trimming (`Job` and `job` are two names). No new column, no idempotency key. | A POST that commits but whose response is lost gets retried; a unique name makes the retry a 409 instead of a second job, and the database settles two concurrent creates. Duplicate-safe, not replay-identical (the retry does not get the original 201). Trade-off: two jobs can never share a name; deleting a job frees its name. Costs one more index on `jobs_job`. `TODO` on the constraint: case-insensitive match (fix: unique index on `Lower("name")`). |
 | Auth | None | Not in spec. `TODO` in `settings.py` + README "Security notes" (fix: DRF permission classes + owner FK). |
 | `ALLOWED_HOSTS` | `*` in `docker-compose.yml`, strict default in `settings.py` | Opening the app by IP on a remote VM otherwise loads the page but every API call gets a 400. Safe only while there is no auth, email or cache; tighten when auth lands. Flagged in README. |
 | Base images | Docker Hub only | Official Playwright image is on `mcr.microsoft.com`, which the brief does not promise. e2e image = `node:*-bookworm` + `npx playwright install --with-deps chromium`. |
@@ -103,7 +106,8 @@ backend/
     models.py  services.py  serializers.py  views.py  urls.py  pagination.py
     migrations/
     management/commands/seed_jobs.py
-    tests/                    # test_models, test_services, test_api, test_scale
+    tests/                    # conftest (fixtures), helpers (assert_in_sync),
+                              # test_models, test_services, test_api, test_scale
 frontend/
   Dockerfile  nginx.conf  vite.config.ts  tsconfig.json
   src/
@@ -155,7 +159,7 @@ named `job-dashboard`. Read the Makefile `test` target and `docker-compose.yml`.
 **Exit:** `make clean && make test` passes twice in a row from a fresh `git clone` into a temp dir;
 `make up` shows the page in a browser.
 
-### [~] Phase 2 — Data model (TDD) — built and verified, awaiting author review
+### [x] Phase 2 — Data model (TDD)
 Tests first (`pytest-django`, real Postgres in the container, `make test-backend`):
 - creating a job sets `created_at` / `updated_at`; saving moves `updated_at`;
 - new job defaults to `current_status = PENDING`;
@@ -186,16 +190,44 @@ No `ON DELETE` clause is expected: the cascade is Django's.
 
 **Exit:** model tests green; the author has reviewed the migration file.
 
-### [ ] Phase 3 — Services and REST API (TDD)
-**3a. Services** (`services.py`): `create_job(name)`, `change_status(job_id, status)`, each in
-`transaction.atomic()`. `change_status` locks the job row with `select_for_update()`, inserts the
-`JobStatus`, then saves `current_status` and `updated_at`.
+### [~] Phase 3 — Services and REST API (TDD) — 3a done and reviewed; 3b not started
+**[x] 3a. Services** (`services.py`): `create_job(name)`, `change_status(job_id, status)`,
+`delete_job(job_id)`, each in `transaction.atomic()`. `change_status` locks the job row with
+`select_for_update()`, inserts the `JobStatus`, then saves `current_status` and `updated_at`.
+`delete_job` takes the same row lock before deleting: Django's cascade is two statements (delete
+the statuses, then the job), and a status change committing between them would make the second
+fail on the foreign key (a 500 instead of a 204).
+
+Model change (new migration, generated in the container): `UniqueConstraint(fields=["name"],
+name="job_name_unique")` in `Job.Meta`. A named constraint rather than `unique=True`, which on a
+`CharField` makes Postgres build a second (`LIKE`) index that nothing here uses.
+
+`create_job(name)` returns the `Job`. It inserts the job and its `PENDING` row in one transaction;
+if the insert violates `job_name_unique` it raises `DuplicateJobName` (defined in `services.py`)
+and writes nothing. There is no "does it exist?" query first: check-then-insert is a race, the
+constraint is not.
+
+Service contract (the services are safe to call without a serializer in front of them):
+- Bad input raises `ValueError` before any query runs. `create_job` trims the name, then refuses
+  blank, over-255, NUL-containing and non-string names. `change_status` refuses anything outside
+  `StatusType`, and checks the status before it looks up the job.
+- An unknown or deleted job id raises `Job.DoesNotExist`.
+- The serializers (3b) repeat the same rules for the friendly 400; the views map `Job.DoesNotExist`
+  to 404 and `DuplicateJobName` to 409. The database check constraints stay as the last line for raw SQL writers.
 
 Sync tests. Invariant: `job.current_status` equals the `status_type` of that job's newest
 `JobStatus` (newest = highest `id`). Services never accept a caller-supplied `timestamp`, so id
 order and timestamp order agree. Model-level `Job.objects.create()` writes no `JobStatus`; only
 `create_job` does. One shared `assert_in_sync(job)` helper, used in:
 - after `create_job`: exactly one status row, `PENDING`, in sync;
+- duplicate name: a second `create_job` raises `DuplicateJobName` and writes nothing (also when
+  only surrounding whitespace differs); a different case is a different name; a deleted job
+  releases its name; several threads creating one name make one job and one status row;
+- model test: the database refuses a second job with the same name;
+- `create_job` with an invalid name raises `ValueError` and writes nothing; whitespace is trimmed;
+  255 characters after trimming fit;
+- `change_status` with an invalid status raises `ValueError` and writes nothing, even when the job
+  id is also unknown;
 - after a sequence of changes: row count is 1 + N, in sync after each step;
 - rollback: force the `Job` save to raise after the `JobStatus` insert; no new status row exists
   and `current_status` is unchanged;
@@ -204,37 +236,60 @@ order and timestamp order agree. Model-level `Job.objects.create()` writes no `J
 - `updated_at` moves after `change_status` (`save(update_fields=[...])` skips `auto_now` fields
   unless listed);
 - `change_status` on a missing or just-deleted job raises not-found and writes nothing;
-- POST/PATCH bodies containing `current_status` do not change it;
+- `delete_job` removes the job and its log only; a missing id raises not-found; a delete racing a
+  status change never ends in a foreign key error or an orphan row;
 - `seed_jobs` output is in sync (Phase 4).
 
-**3b. API** (`serializers.py`, `views.py`, `pagination.py`, `urls.py`); viewset limited to
+**Verify 3a (author), before 3b starts:** `make test-backend` green with nothing skipped in
+`test_services.py`. In a Django shell in the backend container (`python manage.py shell`), call
+`create_job` (twice with the same name: the second raises `DuplicateJobName`) and `change_status`
+a few times, then in `psql` check `\d jobs_job` shows `job_name_unique`, and compare `jobs_job.current_status` with
+the newest `jobs_jobstatus` row for that job. Remove `transaction.atomic()` from `change_status` on
+purpose and confirm the rollback test goes red; remove `select_for_update()` and confirm the lock
+test goes red; restore both.
+
+**Exit 3a:** service tests green; both break-it checks went red; the author has read `services.py`.
+
+**[ ] 3b. API.** Start the same way as 3a: skeleton tests with docstrings for author review, then
+the plan, then code. Reuse from 3a: the `job`, `other_job` and `run_in_threads` fixtures
+(`tests/conftest.py`) and `assert_in_sync` (`tests/helpers.py`). Views call the three services and
+never write models directly; they map `ValueError` to 400, `Job.DoesNotExist` to 404 and
+`DuplicateJobName` to 409.
+
+Files: (`serializers.py`, `views.py`, `pagination.py`, `urls.py`); viewset limited to
 list / create / partial_update / destroy; no authentication classes.
+- POST/PATCH bodies containing `current_status` do not change it.
 - `GET /api/jobs/`: `{next, previous, results}`; fields `id`, `name`, `current_status`,
   `created_at`, `updated_at`; newest first; page of 20; walking `next` to the end returns every
   job exactly once; a garbage `cursor` gives a 4xx, not a 500; empty table gives empty results.
 - `POST /api/jobs/`: 201 + one `PENDING` row; blank, whitespace-only, missing, over-255 and
-  NUL-containing names give 400 with a field error; surrounding whitespace trimmed; duplicate
-  names allowed.
+  NUL-containing names give 400 with a field error; surrounding whitespace trimmed; a name that
+  already exists gives 409 and writes nothing.
 - `PATCH /api/jobs/<id>/`: 200 + appended row; missing / unknown / wrong-case `status_type` gives
   400 and writes nothing; unknown id gives 404; same status as current still appends.
 - `DELETE /api/jobs/<id>/`: 204 with empty body; statuses gone; second delete gives 404.
 - A non-numeric id, or one larger than a bigint, gives 404, not 500.
 - PUT and `GET /api/jobs/<id>/` give 405 (not in the brief).
 
-Audit pass before leaving the phase: validation, auth (deferred, TODO), idempotency (PATCH appends
-by design; no idempotency key on POST, TODO), atomicity, failure handling, limits, concurrency,
+Audit pass before leaving the phase: validation, auth (deferred, TODO), idempotency (POST is
+duplicate-safe through the unique name; PATCH appends by design), atomicity, failure handling, limits, concurrency,
 observability (gunicorn access log to stdout), tests.
 
-**Manual check (author):** `curl` all four endpoints through nginx (`make up`), plus bad inputs: blank
-name, unknown status, garbage cursor, unknown id. Watch `docker compose logs backend` while doing it.
+**Verify 3b (author):** `make test-backend` green. `curl` all four endpoints through nginx
+(`make up`), plus bad inputs: blank name, unknown status, garbage cursor, unknown id. Watch
+`docker compose logs backend` while doing it: every request shows one access-log line and no
+traceback.
 
-**Exit:** `make test-backend` green; `curl` walkthrough of all four endpoints via `make up`.
+**Exit 3b (closes the phase):** API tests green; `curl` walkthrough done; audit pass done; `make test`
+still green.
 
 ### [ ] Phase 4 — Scale guards (small; first to cut)
 1. `seed_jobs` management command: N jobs + initial statuses via
    `INSERT ... SELECT generate_series(...)`. `make seed N=1000000`. The raw SQL must supply
    every column (`created_at`, `updated_at`, `current_status`, `timestamp`): Django's `default`,
    `auto_now_add` and `auto_now` are applied in Python, the columns have no database default.
+   Names must be unique and must not collide on a second `make seed`: derive each from the
+   row's own id.
 2. `test_scale.py`:
    - list endpoint runs the same number of queries for 1 job and for a full page (no N+1);
    - seed ~20k rows, `ANALYZE`, `EXPLAIN` the list query: uses the primary-key index, no
@@ -273,6 +328,7 @@ and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Sc
    - After create: return to the first page so the new job is visible.
    - After a delete empties a non-first page, or the API rejects a stale cursor: reset to first.
    - Submit / row controls disabled while their request is in flight (prevents double-create).
+   - A 409 on create shows "a job with this name already exists" on the name field.
    - Status control driven by server data, so a failed PATCH shows the old value.
 4. Components per the approved design. AntD `Form` rules mirror the server rules (required,
    trimmed, max 255).
@@ -301,7 +357,8 @@ confirm the matching test goes red and `make test` exits non-zero.
 ### [ ] Phase 8 — README and final verification
 1. README: prerequisites; Makefile commands; short endpoint table; performance section
    (denormalized status, keyset pagination, no `COUNT`, what the index test proves, what would
-   come next); decisions and trade-offs; deferred items; time spent; prompt-engineering writeup +
+   come next; the unique index on `name` is one more index checked on every insert); decisions and
+   trade-offs; deferred items; time spent; prompt-engineering writeup +
    transcript link.
 2. Final audit against the criteria checklist at the top of this file.
 3. Fresh-clone rehearsal on macOS; on Linux too if available.

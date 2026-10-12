@@ -105,6 +105,16 @@ def test_job_name_accepts_255_characters_and_rejects_256() -> None:
     assert Job.objects.count() == 1
 
 
+def test_database_rejects_a_duplicate_job_name() -> None:
+    """The unique constraint on ``Job.name`` refuses a second job with a name already in use."""
+    Job.objects.create(name="job")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Job.objects.create(name="job")
+
+    assert Job.objects.count() == 1
+
+
 def test_jobstatus_timestamp_defaults_to_now() -> None:
     """A status created without a ``timestamp`` records the time of the insert."""
     job = Job.objects.create(name="job")
@@ -135,3 +145,4 @@ def test_migrations_match_the_models() -> None:
     """Every model change has a migration: ``makemigrations`` finds nothing left to generate."""
     # --check exits non-zero (SystemExit) when a model change has no migration.
     call_command("makemigrations", "--check", "--dry-run")
+

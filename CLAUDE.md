@@ -83,6 +83,7 @@ The 4 hours is a guideline; the author decides any cuts.
 | Error mapping | `service_errors()` context manager in `views.py`, wrapped around the service call only: `InvalidJobInput` 400, `Job.DoesNotExist` 404, `DuplicateJobName` 409. A plain `ValueError` stays a 500. | Catching every `ValueError`, globally or inside the service call, would report bugs as client mistakes. |
 | Ids from URLs | `jobs/ids.py` `parse_job_id`: plain ASCII digits within bigint, else 404. Used for the path id and for the cursor position. | DRF does not check the cursor position: `?cursor=` + base64(`p=abc`) reached the query and raised `ValueError` (a 500). `int()` alone also accepts `1_0`, signs and non-ASCII digits. |
 | Numeric name | `{"name": 123}` is accepted and stored as `"123"` (DRF `CharField` default), pinned by a test. | Author's choice; the service itself still refuses non-strings. |
+| Seed data | `seed_jobs` command: raw SQL, one statement, names from the row's own id; the one writer outside `services.py`. Ships in the runtime image; `make seed` runs it in the `make up` stack only. | A million ORM inserts take minutes; one `INSERT ... SELECT generate_series` takes about 30 s. One statement is atomic, so jobs and status rows stay in sync. `TODO` in the command: no guard against running it on a real database. |
 | Frontend serving | Multi-stage build; nginx serves static files and proxies `/api` to gunicorn | Production-shaped, single origin, no CORS config. |
 | Data fetching | TanStack Query | Invalidate-after-mutation makes "UI updates dynamically" correct and small. |
 | Ordering | `-id` (newest first) | Primary-key index, unique (cursor pagination requires it), no extra index. |
@@ -98,7 +99,7 @@ The 4 hours is a guideline; the author decides any cuts.
 ## Target layout
 
 ```
-Makefile                      # build, up, test, stop, clean (+ test-backend, help; seed in Phase 4)
+Makefile                      # build, up, test, stop, clean (+ test-backend, seed, help)
 docker-compose.yml            # db, backend, frontend (+ e2e under a profile); no host ports
 docker-compose.override.yml   # host port for `make up` only (FRONTEND_PORT, default 8080)
 docker-compose.backend-test.yml  # pytest runner, loaded only by `make test-backend`
@@ -112,7 +113,7 @@ backend/
     exceptions.py  ids.py     # error bodies with codes + Conflict (409); parse_job_id
     parsers.py                # JSONParser: 400 for JSON nested too deeply
     migrations/
-    management/commands/seed_jobs.py
+    management/commands/seed_jobs.py  # dev tool: N jobs + status rows in one SQL statement
     tests/                    # conftest (fixtures incl. api_client), helpers (assert_in_sync,
                               # status_log, MISSING_JOB_ID),
                               # test_models, test_services, test_api, test_scale
@@ -198,7 +199,7 @@ No `ON DELETE` clause is expected: the cascade is Django's.
 
 **Exit:** model tests green; the author has reviewed the migration file.
 
-### [~] Phase 3 — Services and REST API (TDD) — 3a done and reviewed; 3b built, awaiting author review
+### [x] Phase 3 — Services and REST API (TDD)
 **[x] 3a. Services** (`services.py`): `create_job(name)`, `change_status(job_id, status)`,
 `delete_job(job_id)`, each in `transaction.atomic()`. `change_status` locks the job row with
 `select_for_update()`, inserts the `JobStatus`, then saves `current_status` and `updated_at`.
@@ -258,7 +259,7 @@ test goes red; restore both.
 
 **Exit 3a:** service tests green; both break-it checks went red; the author has read `services.py`.
 
-**[~] 3b. API.** skeleton tests, then the plan, then code. Reuse from 3a: the `job`, `other_job` and `run_in_threads` fixtures
+**[x] 3b. API.** skeleton tests, then the plan, then code. Reuse from 3a: the `job`, `other_job` and `run_in_threads` fixtures
 (`tests/conftest.py`) and `assert_in_sync` (`tests/helpers.py`). Views call the three services and
 never write models directly; they map `InvalidJobInput` to 400, `Job.DoesNotExist` to 404 and
 `DuplicateJobName` to 409.
@@ -305,23 +306,33 @@ traceback.
 **Exit 3b (closes the phase):** API tests green; `curl` walkthrough done; audit pass done; `make test`
 still green.
 
-### [ ] Phase 4 — Scale guards (small; first to cut)
+### [~] Phase 4 — Scale guards (small; first to cut) — built, awaiting author review
 1. `seed_jobs` management command: N jobs + initial statuses via
    `INSERT ... SELECT generate_series(...)`. `make seed N=1000000`. The raw SQL must supply
    every column (`created_at`, `updated_at`, `current_status`, `timestamp`): Django's `default`,
    `auto_now_add` and `auto_now` are applied in Python, the columns have no database default.
    Names must be unique and must not collide on a second `make seed`: derive each from the
    row's own id.
+   Built as one statement (two CTEs): ids are drawn from the table's sequence first, the name
+   is `Seeded job <id>`, a name already taken is skipped (`ON CONFLICT (name) DO NOTHING`) and
+   only inserted jobs get a status row. Count must be 1 to 10,000,000 per run. `make seed`
+   runs it with `exec` in the `make up` stack, so the app must be running; the test stacks
+   never see seeded rows.
 2. `test_scale.py`:
    - list endpoint runs the same number of queries for 1 job and for a full page (no N+1);
    - seed ~20k rows, `ANALYZE`, `EXPLAIN` the list query: uses the primary-key index, no
      `Seq Scan`, no `Sort`.
 3. Manual: seed 1M, open the UI, page forward; note the result for the README.
+   Measured on the API (throwaway stack, Apple Silicon laptop, 2026-10-11): seeding 1M jobs
+   took 29 s; 200 consecutive pages median 1.4 ms, max 20 ms; a page at id < 500,000 took
+   4 ms; plan is `Index Scan Backward using jobs_job_pkey`, 0.03 ms execution; tables are
+   170 MB (`jobs_job`) and 100 MB (`jobs_jobstatus`). The UI half of this check waits for
+   Phase 6, when the page has a list.
 
 **Manual check (author):** automated tests are not enough here. Seed 1M rows, page through the UI,
 and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Scan`, no `Sort`).
 
-**Exit:** tests green; UI responsive against 1M rows.
+**Exit:** tests green; API responsive against 1M rows (UI check moves to Phase 6).
 
 ### [ ] Phase 5 — Frontend design (no code)
 1. Interactive mockup of the single page in AntD's visual language, showing: populated, empty,
@@ -363,7 +374,8 @@ and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Sc
 
 **Manual check (author):** automated tests are not enough here. Click through create / update /
 delete; stop the backend mid-session; use the keyboard only (Tab / Enter / Esc); double-click Create
-quickly and confirm one job; page Next / Previous.
+quickly and confirm one job; page Next / Previous. `make seed`, then page forward through the 1M
+rows (carried over from Phase 4).
 
 **Exit:** manual walkthrough of create / update / delete and each error state against `make up`
 (including stopping the backend container); `tsc --noEmit` clean in the image build.

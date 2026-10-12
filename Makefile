@@ -4,6 +4,8 @@ SHELL := bash
 
 FRONTEND_PORT ?= 8080
 export FRONTEND_PORT
+# Number of jobs `make seed` creates.
+N ?= 1000000
 
 COMPOSE := docker compose
 # The test stack is a separate compose project (own containers, network and
@@ -14,7 +16,7 @@ TEST_COMPOSE := docker compose -p job-dashboard-test -f docker-compose.yml --pro
 # so they can run next to `make up` or `make test` without sharing any state.
 BACKEND_TEST_COMPOSE := docker compose -p job-dashboard-backend-test -f docker-compose.yml -f docker-compose.backend-test.yml
 
-.PHONY: help build up test test-backend stop clean
+.PHONY: help build up seed test test-backend stop clean
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  make %-13s %s\n", $$1, $$2}'
@@ -25,6 +27,13 @@ build: ## Build the Docker images
 up: ## Start the app at http://localhost:8080 (override: FRONTEND_PORT=3000 make up)
 	$(COMPOSE) up -d --build --wait
 	@echo "App running at http://localhost:$(FRONTEND_PORT)"
+
+# Runs inside the backend container of the `make up` stack (`exec`, not `run`),
+# so it writes to the database the app is showing. The test stacks are separate
+# projects and never see these rows.
+seed: ## Add N jobs to the running app (default 1000000; needs `make up` first): make seed N=5000
+	@$(COMPOSE) exec -T backend python manage.py seed_jobs "$(N)" || \
+	{ echo "make seed needs the app running (make up) and N between 1 and 10000000."; exit 1; }
 
 # One shell invocation so the trap always tears the stack down and the recipe
 # exits with the Playwright exit code. A leftover stack from an interrupted run

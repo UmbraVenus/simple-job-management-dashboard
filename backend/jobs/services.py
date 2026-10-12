@@ -1,4 +1,7 @@
-"""The only code that writes jobs.
+"""The only application code that writes jobs.
+
+(The ``seed_jobs`` management command, a development tool, bulk-inserts with
+SQL and keeps the same invariant.)
 
 Every write keeps one invariant: ``Job.current_status`` equals the
 ``status_type`` of that job's newest ``JobStatus`` row. Each function validates

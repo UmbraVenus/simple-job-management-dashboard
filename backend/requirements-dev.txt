@@ -1,0 +1,12 @@
+# Test-only dependencies. Installed in the Dockerfile's `test` stage, never in
+# the runtime image. Exact pins, resolved inside python:3.13-slim-bookworm.
+-r requirements.txt
+
+pytest==9.1.1
+pytest-django==4.14.0
+
+# Transitive
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0

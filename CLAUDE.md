@@ -44,6 +44,8 @@ The 4 hours is a guideline; the author decides any cuts.
 - **Python docstrings: reST style** (`:param name:`, `:returns:`, `:raises Exc:`). Types live in the
   function signature, so no `:type:` / `:rtype:` fields when the signature is annotated, e.g.
   `def health(request: HttpRequest) -> JsonResponse:`. Every function is fully annotated.
+- **Every test has a docstring:** at least one line saying what behaviour it checks (plus `:param:`
+  for parametrized arguments).
 - **Deferred work** gets a `TODO` in code and a one-line spoken reason (what, why deferred, fix).
 - **Teaching:** The author's production stack is Flask + MySQL + Elasticsearch, with DevOps owning
   Docker/Make. Explain Django, Postgres, Dockerfile, Compose and Makefile concepts by analogy to
@@ -53,6 +55,12 @@ The 4 hours is a guideline; the author decides any cuts.
 - **`.gitignore` is project-specific** (the generic Python template ignored `lib/`, `dist/`, `build/`
   at any depth). Add only anchored or unambiguous patterns; after adding a folder, check
   `git status` shows it.
+- **Migrations** are generated in the container, never hand-written, then reviewed:
+  `docker compose -p job-dashboard-backend-test -f docker-compose.yml -f docker-compose.backend-test.yml
+  run --rm --user "$(id -u):$(id -g)" -v "$PWD/backend:/app" backend-test python manage.py
+  makemigrations jobs`. `test_migrations_match_the_models` fails if one is missing.
+- **Python pins:** resolve new ones inside `python:3.13-slim-bookworm` (`pip install`, `pip freeze`),
+  never from a host environment.
 - **Lockfiles:** regenerate with `docker run --rm -v "$PWD/frontend":/w -w /w node:22-bookworm-slim
   npm install --package-lock-only` (same for `e2e`), never from a host `node_modules`.
 
@@ -64,6 +72,10 @@ The 4 hours is a guideline; the author decides any cuts.
 | Pagination | Keyset (cursor) in the API, Prev/Next in the UI, fixed page size of 20 | Constant cost at any depth, no `COUNT(*)` over millions of rows. |
 | AntD table | `<Table pagination={false} />` + a small `CursorPager` (two `Button`s) | AntD's built-in pagination needs a `total`; a cursor API never counts. Same idea as ES `search_after` vs `from/size`. |
 | `make test` | Playwright E2E only (spec-literal) | Backend tests run via `make test-backend`. |
+| Backend tests | pytest + pytest-django against real Postgres, in the Dockerfile's `test` stage (`requirements-dev.txt`). Own compose project (`job-dashboard-backend-test`) and own file (`docker-compose.backend-test.yml`). Migrations stay on. | Runtime image carries no test tooling; the gate never parses the test file; tests exercise the schema that ships. |
+| Delete cascade | `on_delete=CASCADE`, carried out by Django. The FK has no `ON DELETE` clause (Django 5.2 cannot declare one). | Spec is met through the API; a raw SQL delete of a job with statuses fails loudly instead of orphaning rows. `TODO` on the FK. |
+| DB check constraints | `job_current_status_valid`, `jobstatus_status_type_valid`, `job_name_not_blank` (at least one non-whitespace character) | `choices` and `blank=False` are not enforced by `save()` or raw SQL (the Phase 4 seed). Serializers still give the friendly 400. |
+| "Latest" status | Newest `JobStatus` = highest `id`, not latest `timestamp` | `timestamp` is a writable column; ids are assigned in insert order and `change_status` serializes inserts per job with a row lock. |
 | API layer | Django REST Framework | Industry default: serializers, viewsets, cursor pagination. |
 | Frontend serving | Multi-stage build; nginx serves static files and proxies `/api` to gunicorn | Production-shaped, single origin, no CORS config. |
 | Data fetching | TanStack Query | Invalidate-after-mutation makes "UI updates dynamically" correct and small. |
@@ -79,11 +91,13 @@ The 4 hours is a guideline; the author decides any cuts.
 ## Target layout
 
 ```
-Makefile                      # build, up, test, stop, clean (+ test-backend, seed, help)
+Makefile                      # build, up, test, stop, clean (+ test-backend, help; seed in Phase 4)
 docker-compose.yml            # db, backend, frontend (+ e2e under a profile); no host ports
 docker-compose.override.yml   # host port for `make up` only (FRONTEND_PORT, default 8080)
+docker-compose.backend-test.yml  # pytest runner, loaded only by `make test-backend`
 backend/
-  Dockerfile  requirements.txt  manage.py  pytest.ini
+  Dockerfile                  # stages: base, test (pytest), runtime (default, last)
+  requirements.txt  requirements-dev.txt  manage.py  pytest.ini
   config/                     # settings.py, urls.py, wsgi.py, views.py (health endpoint)
   jobs/
     models.py  services.py  serializers.py  views.py  urls.py  pagination.py
@@ -107,7 +121,7 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and reviewed.
 
 ### [x] Phase 0 — This file
 
-### [~] Phase 1 — Walking skeleton (the gate) — built and verified, awaiting author review
+### [x] Phase 1 — Walking skeleton (the gate)
 Goal: every container exists and talks to the next one; `make test` is green with no features.
 1. `backend/`: Django project `config`, single app `jobs`, `GET /api/health/` that runs
    `SELECT 1`. Settings from env vars with working defaults (no `.env` needed on a clone).
@@ -141,25 +155,34 @@ named `job-dashboard`. Read the Makefile `test` target and `docker-compose.yml`.
 **Exit:** `make clean && make test` passes twice in a row from a fresh `git clone` into a temp dir;
 `make up` shows the page in a browser.
 
-### [ ] Phase 2 — Data model (TDD)
+### [~] Phase 2 — Data model (TDD) — built and verified, awaiting author review
 Tests first (`pytest-django`, real Postgres in the container, `make test-backend`):
 - creating a job sets `created_at` / `updated_at`; saving moves `updated_at`;
 - new job defaults to `current_status = PENDING`;
-- an invalid status is rejected by the database on both tables;
-- deleting a job deletes its `JobStatus` rows and leaves other jobs' rows alone.
+- an invalid status (unknown, wrong case, empty) is rejected by the database on both tables;
+- a blank or whitespace-only name is rejected by the database; 255 characters fit, 256 do not;
+- deleting a job deletes its `JobStatus` rows and leaves other jobs' rows alone;
+- the migration files match the models (`makemigrations --check --dry-run`).
+
+Harness (built here): `requirements-dev.txt`, Dockerfile `test` stage, `pytest.ini`,
+`docker-compose.backend-test.yml`, `make test-backend`.
 
 Build:
 - `Job`: `name` (`CharField(max_length=255)`), `created_at` (`auto_now_add`), `updated_at`
   (`auto_now`), `current_status` (`TextChoices`, default `PENDING`).
 - `JobStatus`: `job` (FK, `on_delete=CASCADE`, `related_name="statuses"`), `status_type`
   (PENDING, RUNNING, COMPLETED, FAILED), `timestamp` (`default=timezone.now`).
-- `CheckConstraint` on `Job.current_status` and `JobStatus.status_type` (Django `choices` are
-  not enforced by `save()`).
+- One `StatusType` enum shared by both models.
+- `CheckConstraint` on `Job.current_status`, `JobStatus.status_type` and `Job.name` (Django
+  `choices` and `blank=False` are not enforced by `save()`).
+- `TODO` on the FK: cascade is ORM-side. `TODO` on `Job.current_status`: not database-enforced
+  against the log; the invariant lives in `services.py` (Phase 3).
 - `TODO` on `JobStatus.Meta`: `(job, -timestamp)` index — history view not specced.
 - `TODO` on `Job.Meta`: `(current_status, -id)` index — no filter yet; every index taxes writes.
 
 **Manual check (author):** read the migration file. In `psql`, `\d jobs_job` and `\d jobs_jobstatus`:
-confirm the check constraints and the FK `ON DELETE` behaviour exist in the database itself.
+confirm the three check constraints, the FK and the index on `job_id` exist in the database itself.
+No `ON DELETE` clause is expected: the cascade is Django's.
 
 **Exit:** model tests green; the author has reviewed the migration file.
 
@@ -169,7 +192,9 @@ confirm the check constraints and the FK `ON DELETE` behaviour exist in the data
 `JobStatus`, then saves `current_status` and `updated_at`.
 
 Sync tests. Invariant: `job.current_status` equals the `status_type` of that job's newest
-`JobStatus` (newest = highest `id`). One shared `assert_in_sync(job)` helper, used in:
+`JobStatus` (newest = highest `id`). Services never accept a caller-supplied `timestamp`, so id
+order and timestamp order agree. Model-level `Job.objects.create()` writes no `JobStatus`; only
+`create_job` does. One shared `assert_in_sync(job)` helper, used in:
 - after `create_job`: exactly one status row, `PENDING`, in sync;
 - after a sequence of changes: row count is 1 + N, in sync after each step;
 - rollback: force the `Job` save to raise after the `JobStatus` insert; no new status row exists
@@ -207,7 +232,9 @@ name, unknown status, garbage cursor, unknown id. Watch `docker compose logs bac
 
 ### [ ] Phase 4 — Scale guards (small; first to cut)
 1. `seed_jobs` management command: N jobs + initial statuses via
-   `INSERT ... SELECT generate_series(...)`. `make seed N=1000000`.
+   `INSERT ... SELECT generate_series(...)`. `make seed N=1000000`. The raw SQL must supply
+   every column (`created_at`, `updated_at`, `current_status`, `timestamp`): Django's `default`,
+   `auto_now_add` and `auto_now` are applied in Python, the columns have no database default.
 2. `test_scale.py`:
    - list endpoint runs the same number of queries for 1 job and for a full page (no N+1);
    - seed ~20k rows, `ANALYZE`, `EXPLAIN` the list query: uses the primary-key index, no

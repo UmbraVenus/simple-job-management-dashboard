@@ -1,6 +1,6 @@
 # Three stages. `base` holds what both images share; `test` adds pytest and is
 # built only by `make test-backend`; `runtime` is last so it is the default
-# target and never contains test tooling.
+# target and contains neither the test tooling nor the tests.
 FROM python:3.13-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -33,7 +33,10 @@ FROM base AS runtime
 
 ENV WEB_CONCURRENCY=3
 
+# Everything is copied and the test files removed, rather than listing what to
+# copy: a new source file can then never be left out of the image.
 COPY . .
+RUN rm -rf jobs/tests pytest.ini requirements-dev.txt
 USER app
 
 EXPOSE 8000
@@ -42,4 +45,4 @@ EXPOSE 8000
 # executable bit or line endings surviving the clone.
 # TODO: migrating on start is only safe with one backend replica; with several,
 # run migrations as a separate one-off step before the rollout.
-CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --access-logfile -"]
+CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi:application --config gunicorn.conf.py --bind 0.0.0.0:8000 --access-logfile -"]

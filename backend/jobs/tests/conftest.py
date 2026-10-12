@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from django.db import connection
+from rest_framework.test import APIClient
 
 from jobs.models import Job
 from jobs.services import create_job
@@ -34,6 +35,15 @@ def other_job(db: None) -> Job:
     :returns: A second job, for checking that a write to one job leaves another alone.
     """
     return create_job("other job")
+
+
+@pytest.fixture
+def api_client() -> APIClient:
+    """
+    :returns: A test client that sends JSON bodies (``TEST_REQUEST_DEFAULT_FORMAT``) and calls
+        the views in-process, without a server.
+    """
+    return APIClient()
 
 
 @pytest.fixture

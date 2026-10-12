@@ -77,15 +77,19 @@ The 4 hours is a guideline; the author decides any cuts.
 | Delete cascade | `on_delete=CASCADE`, carried out by Django. The FK has no `ON DELETE` clause (Django 5.2 cannot declare one). | Spec is met through the API; a raw SQL delete of a job with statuses fails loudly instead of orphaning rows. `TODO` on the FK. |
 | DB check constraints | `job_current_status_valid`, `jobstatus_status_type_valid`, `job_name_not_blank` (at least one non-whitespace character) | `choices` and `blank=False` are not enforced by `save()` or raw SQL (the Phase 4 seed). Serializers still give the friendly 400. |
 | "Latest" status | Newest `JobStatus` = highest `id`, not latest `timestamp` | `timestamp` is a writable column; ids are assigned in insert order and `change_status` serializes inserts per job with a row lock. |
-| Service validation | `services.py` validates its own input: `ValueError` for a bad name or status, `Job.DoesNotExist` for an unknown id. Serializers repeat the rules. | Services stay correct for any caller (shell, management command), not only behind the API; bad input never reaches the database as an `IntegrityError`. |
-| API layer | Django REST Framework | Industry default: serializers, viewsets, cursor pagination. |
+| Service validation | `services.py` validates its own input: `InvalidJobInput` (a `ValueError` subclass) for a bad name or status, `Job.DoesNotExist` for an unknown id. Serializers repeat the rules. | Services stay correct for any caller (shell, management command), not only behind the API; bad input never reaches the database as an `IntegrityError`. |
+| API layer | Django REST Framework 3.18. JSON in and out only (`jobs/parsers.py` `JSONParser`, `JSONRenderer`), no browsable API. `OPTIONS` answers 405 (`DEFAULT_METADATA_CLASS: None`). `django.contrib.auth` is not installed (`UNAUTHENTICATED_USER: None`). | Industry default: serializers, viewsets, cursor pagination. JSON-only input is a security choice: a form or `text/plain` POST crosses origins without a CORS preflight, so with no auth any web page could create jobs; it now gets a 415. |
+| Error bodies | Every error carries a stable `code` and an English `message` (`jobs/exceptions.py`): `{"name": [{"message", "code"}]}` for a field, `{"detail": {"message", "code"}}` for the request. Duplicate name is 409 `{"name": [{..., "code": "duplicate"}]}`. | API text and display text stay separate: the frontend maps `code` to its own copy from a JSON file (Phase 6) and never shows `message`. The tests pin the codes. |
+| Error mapping | `service_errors()` context manager in `views.py`, wrapped around the service call only: `InvalidJobInput` 400, `Job.DoesNotExist` 404, `DuplicateJobName` 409. A plain `ValueError` stays a 500. | Catching every `ValueError`, globally or inside the service call, would report bugs as client mistakes. |
+| Ids from URLs | `jobs/ids.py` `parse_job_id`: plain ASCII digits within bigint, else 404. Used for the path id and for the cursor position. | DRF does not check the cursor position: `?cursor=` + base64(`p=abc`) reached the query and raised `ValueError` (a 500). `int()` alone also accepts `1_0`, signs and non-ASCII digits. |
+| Numeric name | `{"name": 123}` is accepted and stored as `"123"` (DRF `CharField` default), pinned by a test. | Author's choice; the service itself still refuses non-strings. |
 | Frontend serving | Multi-stage build; nginx serves static files and proxies `/api` to gunicorn | Production-shaped, single origin, no CORS config. |
 | Data fetching | TanStack Query | Invalidate-after-mutation makes "UI updates dynamically" correct and small. |
 | Ordering | `-id` (newest first) | Primary-key index, unique (cursor pagination requires it), no extra index. |
 | PATCH contract | Body `{"status_type": "<STATE>"}`, required. Any state to any state, including the current one; every PATCH appends a `JobStatus` row. | Spec-literal. Not idempotent by design; note in README. |
 | Unique job name | `UniqueConstraint` `job_name_unique` on `Job.name`; `create_job` raises `DuplicateJobName`, the API answers 409. Exact match after trimming (`Job` and `job` are two names). No new column, no idempotency key. | A POST that commits but whose response is lost gets retried; a unique name makes the retry a 409 instead of a second job, and the database settles two concurrent creates. Duplicate-safe, not replay-identical (the retry does not get the original 201). Trade-off: two jobs can never share a name; deleting a job frees its name. Costs one more index on `jobs_job`. `TODO` on the constraint: case-insensitive match (fix: unique index on `Lower("name")`). |
-| Auth | None | Not in spec. `TODO` in `settings.py` + README "Security notes" (fix: DRF permission classes + owner FK). |
-| `ALLOWED_HOSTS` | `*` in `docker-compose.yml`, strict default in `settings.py` | Opening the app by IP on a remote VM otherwise loads the page but every API call gets a 400. Safe only while there is no auth, email or cache; tighten when auth lands. Flagged in README. |
+| Auth | None | Not in spec. `TODO` in `settings.py` + README "Security notes" (fix: DRF permission classes + owner FK, with `django.contrib.auth` and `contenttypes` back in `INSTALLED_APPS`). |
+| `ALLOWED_HOSTS` | `*` in `docker-compose.yml`, strict default in `settings.py` (pinned by `test_host_header_is_checked`) | Opening the app by IP on a remote VM otherwise loads the page but every API call gets a 400, which costs more with a reviewer than the risk it removes. Accepted risk: DNS rebinding (a web page re-pointing its DNS at this machine and calling the API same-origin); small for a demo database on a port already open to the network. Strict was tried after the backend review and reverted by the author. Tighten when auth lands. In README. |
 | Base images | Docker Hub only | Official Playwright image is on `mcr.microsoft.com`, which the brief does not promise. e2e image = `node:*-bookworm` + `npx playwright install --with-deps chromium`. |
 | Test stack isolation | Own compose project (`job-dashboard-test`), no published host ports. Host ports live only in `docker-compose.override.yml`, which `make up` auto-loads and `make test` skips (`-f docker-compose.yml`). | Busy ports on the evaluator's machine cannot fail the gate; works on any compose v2 (no `!reset`). |
 | nginx to backend | `proxy_pass` through a variable + Docker DNS `resolver`; `Host $http_host` | nginx starts and recovers when the backend is down or restarts; the forwarded Host keeps its port so DRF pagination links are correct. |
@@ -101,12 +105,16 @@ docker-compose.backend-test.yml  # pytest runner, loaded only by `make test-back
 backend/
   Dockerfile                  # stages: base, test (pytest), runtime (default, last)
   requirements.txt  requirements-dev.txt  manage.py  pytest.ini
+  gunicorn.conf.py            # drops healthy health checks from the access log; no control socket
   config/                     # settings.py, urls.py, wsgi.py, views.py (health endpoint)
   jobs/
     models.py  services.py  serializers.py  views.py  urls.py  pagination.py
+    exceptions.py  ids.py     # error bodies with codes + Conflict (409); parse_job_id
+    parsers.py                # JSONParser: 400 for JSON nested too deeply
     migrations/
     management/commands/seed_jobs.py
-    tests/                    # conftest (fixtures), helpers (assert_in_sync),
+    tests/                    # conftest (fixtures incl. api_client), helpers (assert_in_sync,
+                              # status_log, MISSING_JOB_ID),
                               # test_models, test_services, test_api, test_scale
 frontend/
   Dockerfile  nginx.conf  vite.config.ts  tsconfig.json
@@ -190,7 +198,7 @@ No `ON DELETE` clause is expected: the cascade is Django's.
 
 **Exit:** model tests green; the author has reviewed the migration file.
 
-### [~] Phase 3 — Services and REST API (TDD) — 3a done and reviewed; 3b not started
+### [~] Phase 3 — Services and REST API (TDD) — 3a done and reviewed; 3b built, awaiting author review
 **[x] 3a. Services** (`services.py`): `create_job(name)`, `change_status(job_id, status)`,
 `delete_job(job_id)`, each in `transaction.atomic()`. `change_status` locks the job row with
 `select_for_update()`, inserts the `JobStatus`, then saves `current_status` and `updated_at`.
@@ -208,8 +216,8 @@ and writes nothing. There is no "does it exist?" query first: check-then-insert 
 constraint is not.
 
 Service contract (the services are safe to call without a serializer in front of them):
-- Bad input raises `ValueError` before any query runs. `create_job` trims the name, then refuses
-  blank, over-255, NUL-containing and non-string names. `change_status` refuses anything outside
+- Bad input raises `InvalidJobInput` (a `ValueError`) before any query runs. `create_job` trims the name, then refuses
+  blank, over-255, NUL-containing, lone-surrogate and non-string names. `change_status` refuses anything outside
   `StatusType`, and checks the status before it looks up the job.
 - An unknown or deleted job id raises `Job.DoesNotExist`.
 - The serializers (3b) repeat the same rules for the friendly 400; the views map `Job.DoesNotExist`
@@ -250,13 +258,12 @@ test goes red; restore both.
 
 **Exit 3a:** service tests green; both break-it checks went red; the author has read `services.py`.
 
-**[ ] 3b. API.** Start the same way as 3a: skeleton tests with docstrings for author review, then
-the plan, then code. Reuse from 3a: the `job`, `other_job` and `run_in_threads` fixtures
+**[~] 3b. API.** skeleton tests, then the plan, then code. Reuse from 3a: the `job`, `other_job` and `run_in_threads` fixtures
 (`tests/conftest.py`) and `assert_in_sync` (`tests/helpers.py`). Views call the three services and
-never write models directly; they map `ValueError` to 400, `Job.DoesNotExist` to 404 and
+never write models directly; they map `InvalidJobInput` to 400, `Job.DoesNotExist` to 404 and
 `DuplicateJobName` to 409.
 
-Files: (`serializers.py`, `views.py`, `pagination.py`, `urls.py`); viewset limited to
+Files: (`serializers.py`, `views.py`, `pagination.py`, `urls.py`, `exceptions.py`, `ids.py`, `parsers.py`); viewset limited to
 list / create / partial_update / destroy; no authentication classes.
 - POST/PATCH bodies containing `current_status` do not change it.
 - `GET /api/jobs/`: `{next, previous, results}`; fields `id`, `name`, `current_status`,
@@ -264,16 +271,31 @@ list / create / partial_update / destroy; no authentication classes.
   job exactly once; a garbage `cursor` gives a 4xx, not a 500; empty table gives empty results.
 - `POST /api/jobs/`: 201 + one `PENDING` row; blank, whitespace-only, missing, over-255 and
   NUL-containing names give 400 with a field error; surrounding whitespace trimmed; a name that
-  already exists gives 409 and writes nothing.
+  already exists gives 409 and writes nothing. A number as the name is stored as its text.
+  A body that is not a JSON object gives 400; malformed or too deeply nested JSON 400; a
+  non-JSON content type 415.
 - `PATCH /api/jobs/<id>/`: 200 + appended row; missing / unknown / wrong-case `status_type` gives
   400 and writes nothing; unknown id gives 404; same status as current still appends.
 - `DELETE /api/jobs/<id>/`: 204 with empty body; statuses gone; second delete gives 404.
 - A non-numeric id, or one larger than a bigint, gives 404, not 500.
-- PUT and `GET /api/jobs/<id>/` give 405 (not in the brief).
+- Every error body has a `code` (see Decisions, "Error bodies").
+- PUT, OPTIONS and `GET /api/jobs/<id>/` give 405 (not in the brief).
+- A `Host` header outside the allowed list gives 400 under the `settings.py` default (compose allows any).
 
 Audit pass before leaving the phase: validation, auth (deferred, TODO), idempotency (POST is
 duplicate-safe through the unique name; PATCH appends by design), atomicity, failure handling, limits, concurrency,
 observability (gunicorn access log to stdout), tests.
+
+Audit result (3b): cursor position unchecked by DRF, closed in `pagination.py`; cross-site form
+POST closed by JSON-only parsers; lone surrogate in a name closed in `_clean_name`. Closed after
+the backend code review: deeply nested JSON giving a 500
+(`parsers.py`), `OPTIONS` describing the wrong schema (405), any `ValueError` in a service mapped
+to 400 (`InvalidJobInput`), tests shipped in the runtime image (`Dockerfile`). Deferred with
+a `TODO` in code: no body-size or rate limit of the API's own (`settings.py`; nginx's 1 MB default
+is the only cap); no `lock_timeout` / `statement_timeout` (`settings.py`, at `DATABASES`);
+invisible characters and un-normalised Unicode in names (`services._clean_name`); unexpected exceptions and unrouted URLs (`/api/jobs/2.5/`, `/api/nope/`) answer
+with Django's HTML page, not JSON (`exceptions.py`). Known and left: a request without the trailing
+slash (`PATCH /api/jobs/2`) gets Django's 301 to the slashed URL, which clients may replay as GET.
 
 **Verify 3b (author):** `make test-backend` green. `curl` all four endpoints through nginx
 (`make up`), plus bad inputs: blank name, unknown status, garbage cursor, unknown id. Watch
@@ -328,7 +350,12 @@ and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Sc
    - After create: return to the first page so the new job is visible.
    - After a delete empties a non-first page, or the API rejects a stale cursor: reset to first.
    - Submit / row controls disabled while their request is in flight (prevents double-create).
-   - A 409 on create shows "a job with this name already exists" on the name field.
+   - Error text comes from a JSON file in the frontend keyed by the API's error `code`
+     (`duplicate`, `blank`, `max_length`, `required`, ...), with a generic fallback for unknown
+     codes; the API's `message` is never shown. A 409 `duplicate` is shown on the name field.
+   - Take the `cursor` value out of the API's `next` / `previous` links and call the relative
+     `/api/jobs/?cursor=...`; do not follow the absolute URL (its scheme is the one Django sees).
+   - Always send the trailing slash (`/api/jobs/<id>/`); without it Django answers 301.
    - Status control driven by server data, so a failed PATCH shows the old value.
 4. Components per the approved design. AntD `Form` rules mirror the server rules (required,
    trimmed, max 255).
@@ -358,7 +385,8 @@ confirm the matching test goes red and `make test` exits non-zero.
 1. README: prerequisites; Makefile commands; short endpoint table; performance section
    (denormalized status, keyset pagination, no `COUNT`, what the index test proves, what would
    come next; the unique index on `name` is one more index checked on every insert); decisions and
-   trade-offs; deferred items; time spent; prompt-engineering writeup +
+   trade-offs (including: PATCH requires `status_type` and does not rename, read from the
+   brief's "Update a job... should involve creating a new JobStatus entry"); deferred items; time spent; prompt-engineering writeup +
    transcript link.
 2. Final audit against the criteria checklist at the top of this file.
 3. Fresh-clone rehearsal on macOS; on Linux too if available.

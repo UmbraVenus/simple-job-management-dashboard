@@ -1,5 +1,16 @@
-"""Assertions shared by the backend tests."""
+"""Assertions and constants shared by the backend tests."""
 from jobs.models import Job, JobStatus
+
+# No job is ever given this id: the tests that use it create at most a few rows.
+MISSING_JOB_ID = 999_999_999
+
+
+def status_log(job: Job) -> list[str]:
+    """
+    :param job: The job whose log to read.
+    :returns: The job's ``status_type`` values, oldest first (by ``id``).
+    """
+    return list(job.statuses.order_by("id").values_list("status_type", flat=True))
 
 
 def assert_in_sync(job: Job) -> None:

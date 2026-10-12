@@ -17,23 +17,12 @@ from pytest_django import DjangoAssertNumQueries
 from jobs.models import Job, JobStatus, StatusType
 from jobs.services import DuplicateJobName, change_status, create_job, delete_job
 from jobs.tests.conftest import ThreadRunner
-from jobs.tests.helpers import assert_in_sync
+from jobs.tests.helpers import MISSING_JOB_ID, assert_in_sync, status_log
 
 pytestmark = pytest.mark.django_db
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=dt_timezone.utc)
 T1 = T0 + timedelta(hours=1)
-
-# No job is ever given this id: the tests that use it create at most a few rows.
-MISSING_JOB_ID = 999_999_999
-
-
-def status_log(job: Job) -> list[str]:
-    """
-    :param job: The job whose log to read.
-    :returns: The job's ``status_type`` values, oldest first (by ``id``).
-    """
-    return list(job.statuses.order_by("id").values_list("status_type", flat=True))
 
 
 class TestCreateJob:
@@ -55,13 +44,13 @@ class TestCreateJob:
         assert status_log(job) == [StatusType.PENDING]
         assert_in_sync(job)
 
-    @pytest.mark.parametrize("name", ["", " ", "\t\n  ", "x" * 256, "nul\x00byte", None])
+    @pytest.mark.parametrize("name", ["", " ", "\t\n  ", "x" * 256, "nul\x00byte", "lone\ud800surrogate", None])
     def test_create_job_with_an_invalid_name_raises_value_error_and_writes_nothing(
         self, name: str | None, django_assert_num_queries: DjangoAssertNumQueries
     ) -> None:
         """An invalid name raises ``ValueError`` before any query runs: no ``Job``, no ``JobStatus``.
 
-        :param name: An empty, whitespace-only, over-255, NUL-containing or missing name.
+        :param name: An empty, whitespace-only, over-255, NUL-containing, unencodable or missing name.
         :param django_assert_num_queries: pytest-django's query counter.
         """
         with django_assert_num_queries(0), pytest.raises(ValueError):

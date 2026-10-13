@@ -95,6 +95,8 @@ The 4 hours is a guideline; the author decides any cuts.
 | Mutation feedback | Hooks show the toast and return the refetch promise from `onSuccess`, so `isPending` lasts until the new list is on screen. No optimistic update. | A deleted row is unmounted before its request settles, so a callback given to `mutate()` in the row would never run. The row always shows what the server stored; a failed PATCH shows the old status. |
 | Query retries | None (`queryClient.ts`). nginx: `resolver_timeout 5s`, `proxy_connect_timeout 5s`; client: 15 s per request. | With nginx defaults a stopped backend left the page on its spinner for about a minute; now the error and its Retry button appear within seconds. |
 | Name length | Counted in code points (`[...name].length`), after trimming. | Django's `max_length` counts code points; `string.length` counts UTF-16 units and would refuse 200 emoji the server accepts. |
+| E2E test data | Each test creates its own job, named `E2E <label> <8 random hex>`, and asserts only inside that job's row. No test assumes an empty table. | A retried test runs against the same database as its first attempt, and names are unique: a fixed name would turn any retry into a 409. Random names also let the tests run repeatedly (`--repeat-each`) or against a `make up` stack. |
+| E2E type check | `tsc --noEmit` in `e2e/Dockerfile` (`typescript` pinned as in the frontend) | Playwright runs `.ts` files without checking types; a type error in a test now fails the image build, so it fails `make test`. |
 | Ordering | `-id` (newest first) | Primary-key index, unique (cursor pagination requires it), no extra index. |
 | PATCH contract | Body `{"status_type": "<STATE>"}`, required. Any state to any state, including the current one; every PATCH appends a `JobStatus` row. | Spec-literal. Not idempotent by design; note in README. |
 | Unique job name | `UniqueConstraint` `job_name_unique` on `Job.name`; `create_job` raises `DuplicateJobName`, the API answers 409. Exact match after trimming (`Job` and `job` are two names). No new column, no idempotency key. | A POST that commits but whose response is lost gets retried; a unique name makes the retry a 409 instead of a second job, and the database settles two concurrent creates. Duplicate-safe, not replay-identical (the retry does not get the original 201). Trade-off: two jobs can never share a name; deleting a job frees its name. Costs one more index on `jobs_job`. `TODO` on the constraint: case-insensitive match (fix: unique index on `Lower("name")`). |
@@ -139,8 +141,11 @@ frontend/
                               # StatusTag, CursorPager, RelativeTime, hooks.ts, useNow.ts,
                               # relativeTime.ts, statusMeta.ts, errorCopy.json + errorCopy.ts
 e2e/
-  Dockerfile  playwright.config.ts (reducedMotion: reduce)
-  tests/smoke.spec.ts         # page loads + empty list; becomes jobs.spec.ts in Phase 7
+  Dockerfile                  # Chromium install, then `tsc --noEmit` as a build step
+  playwright.config.ts        # reducedMotion: reduce; retries 1; expect timeout 10 s
+  tsconfig.json               # strict; used only by the type check
+  tests/jobs.spec.ts          # create + change status + reload; create + delete
+  tests/helpers.ts            # uniqueJobName, jobRow, statusCell, createJob
 ```
 
 ## Plan
@@ -369,7 +374,7 @@ questions settled: status control is the button menu; Created and Updated column
 
 **Exit:** design approved by the author.
 
-### [~] Phase 6 — Frontend implementation — built, awaiting author review
+### [x] Phase 6 — Frontend implementation
 1. `types/job.ts`: `JOB_STATUSES` as a `const` tuple, `JobStatusType` derived from it, `Job`,
    `Page<T>`.
 2. `api/client.ts`: one `fetch` wrapper throwing a typed `ApiError`. Must handle 204 with no body
@@ -391,8 +396,8 @@ questions settled: status control is the button menu; Created and Updated column
 5. Remove the Phase 1 health placeholder.
 
 Built (differences from the list above):
-- The health placeholder is gone, so `smoke.spec.ts` now checks the heading, the empty state
-  ("No jobs yet") and the name input. The two real flows are still Phase 7.
+- The health placeholder is gone, so `smoke.spec.ts` checked the heading, the empty state
+  ("No jobs yet") and the name input until Phase 7 replaced it.
 - `StatusSelect` became `StatusMenu`; `JobActions` holds one row's two mutations so either request
   disables both controls.
 - A 404 on PATCH / DELETE (job deleted elsewhere) shows "This job no longer exists." and reloads
@@ -429,13 +434,27 @@ rows (carried over from Phase 4).
 **Exit:** manual walkthrough of create / update / delete and each error state against `make up`
 (including stopping the backend container); `tsc --noEmit` clean in the image build.
 
-### [ ] Phase 7 — E2E tests
+### [~] Phase 7 — E2E tests — built, awaiting author review
 1. Replace the smoke test with two tests:
    - create a job, see it listed as `PENDING`; change its status, see the new status, still there
      after a reload;
    - create a job, delete it, it is gone.
 2. Reliability rules: unique job name per test, assertions scoped to that job's row; role/label
    locators; web-first assertions, no fixed sleeps; trace kept on failure; fresh DB per run.
+
+Built (differences from the list above):
+- The status shown is the UI label (`Pending`, `Running`), matched on the row's status cell.
+- The delete test does not reload: there is no optimistic update, so the row leaves only when the
+  refetched list from the server no longer has it. A "row is absent" check right after a reload
+  would pass on a page that has not loaded yet.
+- The status test asserts `Running` in the row before `page.reload()`, so the reload cannot cancel
+  the PATCH.
+- `expect` timeout raised from 5 s to 10 s for slow machines.
+- Checked by Claude: `make test` exit 0 three times in a row (2 passed, 0 flaky);
+  `playwright test --repeat-each 10 --retries 0` against one database, 20 passed; a deliberate
+  type error in `helpers.ts` fails the e2e image build.
+- Deferred with a `TODO` in code: the trace of a failed test is removed with the container
+  (`docker-compose.yml`, `e2e` service). Author's choice: any fix changes the gate recipe.
 
 **Manual check (author):** tests are the check, with one addition: break a feature on purpose and
 confirm the matching test goes red and `make test` exits non-zero.

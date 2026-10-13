@@ -76,9 +76,11 @@ services:
     # init process to reap the helper processes it spawns.
     shm_size: 1gb
     init: true
-    # TODO: traces of failed tests stay inside the container and are removed
-    # with it. Deferred: a bind mount would leave root-owned files in the clone
-    # on Linux. Fix: `docker compose cp` the test-results folder out on failure.
+    # TODO: the trace of a failed test (/e2e/test-results) is removed with the
+    # container, so a failure leaves only the console output. Deferred: every
+    # fix changes the `make test` recipe (the gate), and a bind mount would
+    # leave root-owned files in the clone on Linux. Fix: give the run a fixed
+    # --name, drop --rm, and `docker cp` the folder out when the run fails.
 
 volumes:
   db-data:

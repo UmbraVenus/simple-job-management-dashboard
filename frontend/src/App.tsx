@@ -1,38 +1,19 @@
-import { useEffect, useState } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { App as AntApp, ConfigProvider } from 'antd';
 
-// Phase 1 placeholder: proves browser -> nginx -> gunicorn -> Postgres works.
-// Replaced by the jobs page in Phase 6.
+import { JobsPage } from './features/jobs/JobsPage';
+import { queryClient } from './queryClient';
+import { theme } from './theme';
 
-type BackendHealth = 'checking' | 'healthy' | 'unreachable';
-
-const HEALTH_LABEL: Record<BackendHealth, string> = {
-  checking: 'Checking backend…',
-  healthy: 'Backend: healthy',
-  unreachable: 'Backend: unreachable',
-};
-
+/** Providers only: the server-state cache, the AntD theme, and AntD's context for toasts. */
 export function App() {
-  const [health, setHealth] = useState<BackendHealth>('checking');
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    // Relative URL: the same build works behind any host or port.
-    fetch('/api/health/', { signal: controller.signal })
-      .then((response) => setHealth(response.ok ? 'healthy' : 'unreachable'))
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setHealth('unreachable');
-        }
-      });
-
-    return () => controller.abort();
-  }, []);
-
   return (
-    <main>
-      <h1>Job Management Dashboard</h1>
-      <p role="status">{HEALTH_LABEL[health]}</p>
-    </main>
+    <QueryClientProvider client={queryClient}>
+      <ConfigProvider theme={theme}>
+        <AntApp>
+          <JobsPage />
+        </AntApp>
+      </ConfigProvider>
+    </QueryClientProvider>
   );
 }

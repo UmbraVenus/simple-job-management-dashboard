@@ -86,6 +86,15 @@ The 4 hours is a guideline; the author decides any cuts.
 | Seed data | `seed_jobs` command: raw SQL, one statement, names from the row's own id; the one writer outside `services.py`. Ships in the runtime image; `make seed` runs it in the `make up` stack only. | A million ORM inserts take minutes; one `INSERT ... SELECT generate_series` takes about 30 s. One statement is atomic, so jobs and status rows stay in sync. `TODO` in the command: no guard against running it on a real database. |
 | Frontend serving | Multi-stage build; nginx serves static files and proxies `/api` to gunicorn | Production-shaped, single origin, no CORS config. |
 | Data fetching | TanStack Query | Invalidate-after-mutation makes "UI updates dynamically" correct and small. |
+| Design | Claude Design artifact `https://claude.ai/artifact/Ls7ujhaUPx8jruzymTSxLG` (board `Main` + 8 state boards). Built from it with: no web font (AntD system stack), primary `#0958d9`, error `#cf1322`. | The mockup loads Roboto from Google Fonts; the gate only promises Docker Hub, and a stylesheet that cannot load blocks rendering. AntD's default blue under white text is below WCAG AA. |
+| Status control | "Change status" button + AntD `Dropdown` menu (design option A). The current status is ticked and disabled. | Real `role=menu` / `menuitem`, so Playwright and screen readers find it by role and name; AntD `Select` is a virtualised combobox in a portal. The UI never sends a same-status PATCH (the API would log a duplicate row). |
+| Table columns | Name, Status, Created, Updated, Actions. Dates are relative labels with the full date as a tooltip. | Author's choice from the design. `useNow.ts` is one 30 s timer read through `useSyncExternalStore`, so a tick re-renders the time cells only. |
+| Pagers and range | Two `CursorPager`s (`nav` labelled "Pagination, top" / "Pagination, bottom") and a range text ("Showing 21–40"; the total only on the last page). | The range comes from the client's own page counter, since the API never counts; it can drift when other users add or delete jobs. Distinct `nav` labels let a test pick one `Next`. |
+| Response checking | `api/decode.ts` checks every response body at run time; `response.json()` is treated as `unknown`. No `as` on network data, no `any`. | A body the types do not describe becomes an `ApiError` the UI already handles, not `undefined` inside a component. No schema library needed for two shapes. |
+| Render containment | Module-level `COLUMNS` with `shouldCellUpdate: job !== previous`; `memo` on row components; each row owns its two mutations (`JobActions`); the form owns its input state. | TanStack Query keeps unchanged `Job` objects identical across refetches, so one status change re-renders one row (measured: typing re-renders nothing outside the form; a status change re-renders that row's cells only). |
+| Mutation feedback | Hooks show the toast and return the refetch promise from `onSuccess`, so `isPending` lasts until the new list is on screen. No optimistic update. | A deleted row is unmounted before its request settles, so a callback given to `mutate()` in the row would never run. The row always shows what the server stored; a failed PATCH shows the old status. |
+| Query retries | None (`queryClient.ts`). nginx: `resolver_timeout 5s`, `proxy_connect_timeout 5s`; client: 15 s per request. | With nginx defaults a stopped backend left the page on its spinner for about a minute; now the error and its Retry button appear within seconds. |
+| Name length | Counted in code points (`[...name].length`), after trimming. | Django's `max_length` counts code points; `string.length` counts UTF-16 units and would refuse 200 emoji the server accepts. |
 | Ordering | `-id` (newest first) | Primary-key index, unique (cursor pagination requires it), no extra index. |
 | PATCH contract | Body `{"status_type": "<STATE>"}`, required. Any state to any state, including the current one; every PATCH appends a `JobStatus` row. | Spec-literal. Not idempotent by design; note in README. |
 | Unique job name | `UniqueConstraint` `job_name_unique` on `Job.name`; `create_job` raises `DuplicateJobName`, the API answers 409. Exact match after trimming (`Job` and `job` are two names). No new column, no idempotency key. | A POST that commits but whose response is lost gets retried; a unique name makes the retry a 409 instead of a second job, and the database settles two concurrent creates. Duplicate-safe, not replay-identical (the retry does not get the original 201). Trade-off: two jobs can never share a name; deleting a job frees its name. Costs one more index on `jobs_job`. `TODO` on the constraint: case-insensitive match (fix: unique index on `Lower("name")`). |
@@ -94,7 +103,7 @@ The 4 hours is a guideline; the author decides any cuts.
 | Base images | Docker Hub only | Official Playwright image is on `mcr.microsoft.com`, which the brief does not promise. e2e image = `node:*-bookworm` + `npx playwright install --with-deps chromium`. |
 | Test stack isolation | Own compose project (`job-dashboard-test`), no published host ports. Host ports live only in `docker-compose.override.yml`, which `make up` auto-loads and `make test` skips (`-f docker-compose.yml`). | Busy ports on the evaluator's machine cannot fail the gate; works on any compose v2 (no `!reset`). |
 | nginx to backend | `proxy_pass` through a variable + Docker DNS `resolver`; `Host $http_host` | nginx starts and recovers when the backend is down or restarts; the forwarded Host keeps its port so DRF pagination links are correct. |
-| Pinned versions | Python 3.13, Django 5.2 LTS, Postgres 17, Node 22, nginx 1.28, Vite 8, React 19, TypeScript 7, Playwright 1.64 | Exact pins in `requirements.txt` and both `package-lock.json` files (generated inside the Node image so all platforms' native binaries are locked). |
+| Pinned versions | Python 3.13, Django 5.2 LTS, Postgres 17, Node 22, nginx 1.28, Vite 8, React 19, TypeScript 7, AntD 6.6, TanStack Query 5.104, Playwright 1.64 | Exact pins in `requirements.txt` and both `package-lock.json` files (generated inside the Node image so all platforms' native binaries are locked). |
 
 ## Target layout
 
@@ -120,12 +129,18 @@ backend/
 frontend/
   Dockerfile  nginx.conf  vite.config.ts  tsconfig.json
   src/
-    api/client.ts  api/jobs.ts
-    types/job.ts
-    features/jobs/            # JobsPage, JobsTable, CreateJobForm, StatusSelect,
-                              # StatusTag, DeleteJobButton, CursorPager, hooks.ts
+    main.tsx  App.tsx (providers only)  queryClient.ts  theme.ts  index.css
+    api/client.ts             # request() + ApiError (kind, status, error codes); 15 s timeout
+    api/decode.ts             # unknown -> Job / Page<Job>, checked at run time; cursorFromLink
+    api/jobs.ts               # listJobs, createJob, updateJobStatus, deleteJob, PAGE_SIZE
+    types/job.ts              # JOB_STATUSES tuple, JobStatusType, Job, Page<T>
+    features/jobs/            # JobsPage, JobsTable (+ LoadErrorAlert), CreateJobForm,
+                              # JobActions (one row's two requests), StatusMenu, DeleteJobButton,
+                              # StatusTag, CursorPager, RelativeTime, hooks.ts, useNow.ts,
+                              # relativeTime.ts, statusMeta.ts, errorCopy.json + errorCopy.ts
 e2e/
-  Dockerfile  playwright.config.ts  tests/smoke.spec.ts (becomes jobs.spec.ts in Phase 7)
+  Dockerfile  playwright.config.ts (reducedMotion: reduce)
+  tests/smoke.spec.ts         # page loads + empty list; becomes jobs.spec.ts in Phase 7
 ```
 
 ## Plan
@@ -306,7 +321,7 @@ traceback.
 **Exit 3b (closes the phase):** API tests green; `curl` walkthrough done; audit pass done; `make test`
 still green.
 
-### [~] Phase 4 — Scale guards (small; first to cut) — built, awaiting author review
+### [x] Phase 4 — Scale guards (small; first to cut)
 1. `seed_jobs` management command: N jobs + initial statuses via
    `INSERT ... SELECT generate_series(...)`. `make seed N=1000000`. The raw SQL must supply
    every column (`created_at`, `updated_at`, `current_status`, `timestamp`): Django's `default`,
@@ -334,7 +349,7 @@ and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Sc
 
 **Exit:** tests green; API responsive against 1M rows (UI check moves to Phase 6).
 
-### [ ] Phase 5 — Frontend design (no code)
+### [x] Phase 5 — Frontend design (no code)
 1. Interactive mockup of the single page in AntD's visual language, showing: populated, empty,
    loading, load error, create validation error, delete confirmation.
 2. Starting point, deliberately sparse:
@@ -347,11 +362,14 @@ and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Sc
    not a native `<select>`, fiddlier for Playwright and screen readers); show a "Created" column?
 4. Iterate until sign-off.
 
+Result: designed by the author in Claude Design (artifact link in Decisions, "Design"). Open
+questions settled: status control is the button menu; Created and Updated columns are both shown.
+
 **Manual check (author):** the sign-off itself; check every listed state is in the mockup.
 
 **Exit:** design approved by the author.
 
-### [ ] Phase 6 — Frontend implementation
+### [~] Phase 6 — Frontend implementation — built, awaiting author review
 1. `types/job.ts`: `JOB_STATUSES` as a `const` tuple, `JobStatusType` derived from it, `Job`,
    `Page<T>`.
 2. `api/client.ts`: one `fetch` wrapper throwing a typed `ApiError`. Must handle 204 with no body
@@ -371,6 +389,27 @@ and read the `EXPLAIN` output of the list query yourself (index scan, no `Seq Sc
 4. Components per the approved design. AntD `Form` rules mirror the server rules (required,
    trimmed, max 255).
 5. Remove the Phase 1 health placeholder.
+
+Built (differences from the list above):
+- The health placeholder is gone, so `smoke.spec.ts` now checks the heading, the empty state
+  ("No jobs yet") and the name input. The two real flows are still Phase 7.
+- `StatusSelect` became `StatusMenu`; `JobActions` holds one row's two mutations so either request
+  disables both controls.
+- A 404 on PATCH / DELETE (job deleted elsewhere) shows "This job no longer exists." and reloads
+  the list. A failed refresh with rows on screen keeps the rows and shows the alert above them.
+- Error toasts stay 5 s, success 3 s.
+- Locators for Phase 7: input `getByLabel('Job name')`; row `getByRole('row', { name: /<name>/ })`;
+  status `getByRole('button', { name: 'Change status of <name>' })` then
+  `getByRole('menuitem', { name: 'Running' })`; delete `getByRole('button', { name: 'Delete <name>' })`
+  then `getByRole('button', { name: 'Delete', exact: true })`; pager
+  `getByRole('navigation', { name: 'Pagination, bottom' })`. The field error is found by its text
+  (AntD 6 gives it no `role="alert"`); the load error is `getByRole('alert')`.
+- Deferred with a `TODO` in code: cursor not kept in the URL (`hooks.ts`); no frontend unit tests
+  (`api/decode.ts`); no Vite dev proxy (`vite.config.ts`); field error is not a live region
+  (`CreateJobForm.tsx`).
+- Checked by Claude against `make up` with 1M seeded rows: create, blank and duplicate name,
+  status change, delete with confirm, Next / Previous, backend stopped then Retry, phone width.
+  Not checked: keyboard-only use, double-click on Create.
 
 **Manual check (author):** automated tests are not enough here. Click through create / update /
 delete; stop the backend mid-session; use the keyboard only (Tab / Enter / Esc); double-click Create
@@ -398,7 +437,7 @@ confirm the matching test goes red and `make test` exits non-zero.
    (denormalized status, keyset pagination, no `COUNT`, what the index test proves, what would
    come next; the unique index on `name` is one more index checked on every insert); decisions and
    trade-offs (including: PATCH requires `status_type` and does not rename, read from the
-   brief's "Update a job... should involve creating a new JobStatus entry"); deferred items; time spent; prompt-engineering writeup +
+   brief's "Update a job... should involve creating a new JobStatus entry"); deferred items; prompt-engineering writeup +
    transcript link.
 2. Final audit against the criteria checklist at the top of this file.
 3. Fresh-clone rehearsal on macOS; on Linux too if available.

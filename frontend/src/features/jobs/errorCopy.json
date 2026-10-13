@@ -1,0 +1,17 @@
+{
+  "name": {
+    "blank": "Enter a job name.",
+    "required": "Enter a job name.",
+    "null": "Enter a job name.",
+    "max_length": "Use 255 characters or fewer.",
+    "duplicate": "A job with this name already exists.",
+    "invalid": "Enter the name as text.",
+    "null_characters_not_allowed": "The name contains a character that can’t be used.",
+    "surrogate_characters_not_allowed": "The name contains a character that can’t be used."
+  },
+  "fallback": "Something went wrong. Try again.",
+  "createFailed": "Couldn’t create the job. Try again.",
+  "updateFailed": "Couldn’t update the status. Try again.",
+  "deleteFailed": "Couldn’t delete the job. Try again.",
+  "jobGone": "This job no longer exists."
+}

@@ -1,0 +1,108 @@
+/* Page-level layout only. Component styling comes from the AntD theme (theme.ts). */
+
+body {
+  margin: 0;
+  background: #f5f5f5;
+}
+
+.jobs-page {
+  box-sizing: border-box;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 48px clamp(16px, 4vw, 32px) 80px;
+}
+
+.jobs-page__header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 40px;
+}
+
+.jobs-page__logo {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  background: #0958d9;
+  box-shadow: 0 4px 12px rgba(9, 88, 217, 0.25);
+}
+
+.jobs-page__toolbar,
+.jobs-page__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px;
+}
+
+.jobs-page__footer {
+  align-items: center;
+  min-height: 32px;
+  padding: 16px 24px;
+}
+
+.jobs-page__range {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  color: rgba(0, 0, 0, 0.65);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.jobs-page__alert {
+  margin: 0 24px 20px;
+}
+
+.create-job-form {
+  display: flex;
+  flex: 1 1 420px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.create-job-form__name {
+  flex: 1 1 280px;
+  max-width: 420px;
+  margin: 0;
+}
+
+.cursor-pager {
+  display: flex;
+  gap: 8px;
+}
+
+.job-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Lines the text button's label up with the column header. */
+  margin-left: -8px;
+}
+
+.job-name {
+  font-weight: 500;
+}
+
+.status-menu__check {
+  display: inline-block;
+  width: 14px;
+}
+
+.delete-confirm__text {
+  display: block;
+  max-width: 260px;
+  overflow-wrap: anywhere;
+}
+
+.jobs-table__placeholder {
+  min-height: 160px;
+}

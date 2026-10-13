@@ -12,6 +12,9 @@ export default defineConfig({
     // Inside the compose network the app is reached by its service name.
     baseURL: process.env.BASE_URL ?? 'http://frontend',
     trace: 'retain-on-failure',
+    // The app turns AntD's open/close animations off for this setting, so a
+    // test never has to wait for a menu or popover to finish moving.
+    reducedMotion: 'reduce',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 });

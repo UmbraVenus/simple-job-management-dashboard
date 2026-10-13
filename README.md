@@ -1,5 +1,19 @@
 # Simple Job Management Dashboard
 
+## Contents
+
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Architecture](#architecture)
+- [Project structure](#project-structure)
+- [Requirements map](#requirements-map)
+- [API](#api)
+- [Performance (millions of jobs)](#performance-millions-of-jobs)
+- [Tests](#tests)
+- [Security notes](#security-notes)
+- [Time spent](#time-spent)
+- [AI usage](#ai-usage)
+
 Create computational jobs, change their status, delete them. Django + PostgreSQL API, React +
 TypeScript (Ant Design) UI, Playwright E2E tests, all in Docker.
 
@@ -77,7 +91,7 @@ flowchart LR
 - `services.py`: `create_job`, `change_status`, `delete_job`, one transaction each.
 - `models.py`: `Job`, `JobStatus` and the database constraints.
 
-## Where things are
+## Project structure
 
 ```
 Makefile                         the commands above

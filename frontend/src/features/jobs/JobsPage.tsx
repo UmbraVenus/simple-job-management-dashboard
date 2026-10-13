@@ -39,6 +39,9 @@ export function JobsPage() {
   const { jobs, isLoadingPage, error } = page;
 
   const hasRows = jobs.length > 0;
+  // With rows on screen the pager is there too; without them it is not, and a
+  // later page that failed to load would be a dead end.
+  const onFirstPage = page.isFirstPage ? null : page.goFirst;
   const hasPager = page.hasPrevious || page.hasNext;
   // No range while a page loads: the rows on screen are still the last page's.
   const range = hasRows && !isLoadingPage ? rangeText(page.pageIndex, jobs.length, page.hasNext) : null;
@@ -84,9 +87,11 @@ export function JobsPage() {
         </div>
 
         {/* A refresh failed but the last rows are still here: keep them, and say so. */}
-        {error !== null && hasRows && <LoadErrorAlert className="jobs-page__alert" onRetry={page.retry} />}
+        {error !== null && hasRows && (
+          <LoadErrorAlert className="jobs-page__alert" onRetry={page.retry} onFirstPage={null} />
+        )}
 
-        <JobsTable jobs={jobs} loading={isLoadingPage} failed={error !== null} onRetry={page.retry} />
+        <JobsTable jobs={jobs} loading={isLoadingPage} failed={error !== null} onRetry={page.retry} onFirstPage={onFirstPage} />
 
         {(hasRows || hasPager) && (
           <div className="jobs-page__footer">

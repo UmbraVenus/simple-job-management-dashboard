@@ -1,11 +1,12 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 import { App } from 'antd';
 import { useCallback, useEffect, useReducer } from 'react';
 
 import { ApiError } from '../../api/client';
 import { createJob, deleteJob, listJobs, updateJobStatus } from '../../api/jobs';
 import type { Job, JobStatusType } from '../../types/job';
-import { failureText, isJobGone } from './errorCopy';
+import { failureText, isJobGone, mayHaveChangedJobs } from './errorCopy';
 import type { MutationFailure } from './errorCopy';
 import { STATUS_META } from './statusMeta';
 
@@ -54,6 +55,8 @@ export type JobsPageState = Readonly<{
   isLoadingPage: boolean;
   /** The last fetch failed. `jobs` may still hold the rows from before it. */
   error: Error | null;
+  /** False on any later page. A later page that failed to load has no pager, so it needs another way back. */
+  isFirstPage: boolean;
   hasNext: boolean;
   hasPrevious: boolean;
   goNext: () => void;
@@ -112,6 +115,7 @@ export function useJobsPage(): JobsPageState {
     pageIndex: position.pageIndex,
     isLoadingPage: query.isPending || query.isPlaceholderData,
     error: isPageUnusable ? null : query.error,
+    isFirstPage: position.cursor === null,
     hasNext: next !== null,
     hasPrevious: previous !== null,
     goNext,
@@ -134,8 +138,49 @@ const NO_JOBS: readonly Job[] = [];
 // time, and what the row shows is always what the server stored.
 
 /**
- * @returns A callback that shows the failure toast, and reloads the list when
- *   the job turned out to be gone.
+ * Bring the pages on screen up to date without reporting a failure to do so.
+ *
+ * Used after a request whose outcome is unknown (timeout, lost response, 5xx):
+ * the change may have been stored, so the rows may be out of date. The usual
+ * `invalidateQueries` refetch would be wrong here on two counts. If the server
+ * is down it fails too and puts a second error (the load alert) next to the
+ * toast the user already got; and waiting for it keeps the row's control
+ * disabled for as long as the server takes to not answer.
+ *
+ * So: fetch each page directly and store it only if it arrives. Every page is
+ * also marked stale, so the next ordinary refetch (window focus, paging) still
+ * happens, and reports its own failure if it has one.
+ */
+async function reloadQuietly(queryClient: QueryClient): Promise<void> {
+  await queryClient.invalidateQueries({ queryKey: jobsKeys.all, refetchType: 'none' });
+  const onScreen = queryClient.getQueryCache().findAll({ queryKey: jobsKeys.all, type: 'active' });
+  await Promise.all(
+    onScreen.map(async (query) => {
+      const cursor = query.queryKey[1];
+      if (cursor !== null && typeof cursor !== 'string') {
+        return;
+      }
+      const seenAt = query.state.dataUpdatedAt;
+      try {
+        const page = await listJobs(cursor);
+        // Skip if an ordinary refetch stored something while this one was out:
+        // that data is at least as new.
+        if (query.state.dataUpdatedAt === seenAt) {
+          queryClient.setQueryData(jobsKeys.page(cursor), page);
+        }
+      } catch {
+        // Still unreachable. The rows stay as they are, marked stale.
+      }
+    }),
+  );
+}
+
+/**
+ * @returns A callback that shows the failure toast and then, unless the API
+ *   refused the request outright, brings the list up to date. A job that is
+ *   gone is a definite answer from a server that is there, so the list is
+ *   reloaded and waited for; an unknown outcome gets a quiet reload in the
+ *   background, and the control is usable again at once.
  */
 function useReportFailure(failure: MutationFailure): (error: Error) => Promise<void> {
   const queryClient = useQueryClient();
@@ -145,6 +190,8 @@ function useReportFailure(failure: MutationFailure): (error: Error) => Promise<v
       void message.error(failureText(failure, error), ERROR_TOAST_SECONDS);
       if (isJobGone(error)) {
         await queryClient.invalidateQueries({ queryKey: jobsKeys.all });
+      } else if (mayHaveChangedJobs(error)) {
+        void reloadQuietly(queryClient);
       }
     },
     [failure, message, queryClient],
@@ -162,6 +209,7 @@ function useReportFailure(failure: MutationFailure): (error: Error) => Promise<v
 export function useCreateJob(onCreated: () => void) {
   const queryClient = useQueryClient();
   const { message } = App.useApp();
+  const reportFailure = useReportFailure('createFailed');
   return useMutation({
     mutationFn: createJob,
     onSuccess: async () => {
@@ -172,9 +220,10 @@ export function useCreateJob(onCreated: () => void) {
       await queryClient.refetchQueries({ queryKey: jobsKeys.page(null), exact: true });
       void message.success('Job created');
     },
-    onError: (error) => {
+    onError: async (error) => {
+      // A refused name is the form's to show; anything else gets the toast.
       if (nameErrorCodeOf(error) === null) {
-        void message.error(failureText('createFailed', error), ERROR_TOAST_SECONDS);
+        await reportFailure(error);
       }
     },
   });

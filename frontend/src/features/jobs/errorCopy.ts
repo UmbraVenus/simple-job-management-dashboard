@@ -23,6 +23,19 @@ export function failureText(failure: MutationFailure, error: Error): string {
   return isJobGone(error) ? copy.jobGone : copy[failure];
 }
 
+/**
+ * True unless the API clearly refused the request and so changed nothing.
+ *
+ * A 4xx other than 404 is a refusal. Everything else leaves the list on screen
+ * possibly out of date: a timeout, a dropped connection or a 5xx can follow a
+ * change the server did commit; an unreadable 2xx body means it committed; a
+ * 404 means the job is gone.
+ */
+export function mayHaveChangedJobs(error: Error): boolean {
+  const refused = error instanceof ApiError && error.status !== null && error.status >= 400 && error.status < 500;
+  return !refused || isJobGone(error);
+}
+
 /** True when the API said the job is not there: deleted elsewhere since this page loaded. */
 export function isJobGone(error: Error): boolean {
   return error instanceof ApiError && error.status === 404;

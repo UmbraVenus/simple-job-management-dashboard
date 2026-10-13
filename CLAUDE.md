@@ -396,7 +396,17 @@ Built (differences from the list above):
 - `StatusSelect` became `StatusMenu`; `JobActions` holds one row's two mutations so either request
   disables both controls.
 - A 404 on PATCH / DELETE (job deleted elsewhere) shows "This job no longer exists." and reloads
-  the list. A failed refresh with rows on screen keeps the rows and shows the alert above them.
+  the list. After any other failed create / PATCH / DELETE that the API did not refuse outright
+  (timeout, lost response, 5xx; `mayHaveChangedJobs` in `errorCopy.ts`) the change may have been
+  stored, so `reloadQuietly` in `hooks.ts` refetches the pages on screen in the background: the
+  result is stored only if it arrives, a failure adds no second error next to the toast, and the
+  row's control is not kept disabled while it runs.
+- AntD error toasts carry `role="alert"`, like the load error: in Phase 7 find the load error by
+  its text ("Couldn’t load jobs"), not by role alone.
+- A failed refresh with rows on screen keeps the rows and shows the alert above them. A later page
+  that fails to load has no rows and no pager, so its alert has a "First page" button next to Retry.
+- The request timeout is an `AbortController` + timer (`api/client.ts`), not `AbortSignal.timeout`
+  / `AbortSignal.any`, which browsers from before 2024 lack.
 - Error toasts stay 5 s, success 3 s.
 - Locators for Phase 7: input `getByLabel('Job name')`; row `getByRole('row', { name: /<name>/ })`;
   status `getByRole('button', { name: 'Change status of <name>' })` then

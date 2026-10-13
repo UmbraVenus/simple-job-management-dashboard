@@ -63,37 +63,51 @@ type RequestOptions = Readonly<{
  */
 export async function request(path: string, options: RequestOptions = {}): Promise<unknown> {
   const { method = 'GET', body, signal } = options;
-  const init: RequestInit = { method, headers: { Accept: 'application/json' } };
+  // One controller, aborted by the caller's signal or by the timeout below.
+  // Built by hand: AbortSignal.timeout() and AbortSignal.any() are missing in
+  // browsers from before 2024, where calling them would fail every request.
+  const controller = new AbortController();
+  const init: RequestInit = { method, headers: { Accept: 'application/json' }, signal: controller.signal };
   if (body !== undefined) {
     init.headers = { ...init.headers, 'Content-Type': 'application/json' };
     init.body = JSON.stringify(body);
   }
+
+  const abort = () => controller.abort();
   // Give up after a while: a request that never answers would otherwise leave
   // its spinner (or its disabled button) on screen for good.
-  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  init.signal = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+  const timer = window.setTimeout(abort, REQUEST_TIMEOUT_MS);
+  if (signal?.aborted) {
+    abort();
+  }
+  signal?.addEventListener('abort', abort, { once: true });
 
-  let response: Response;
   try {
-    response = await fetch(path, init);
-  } catch (cause) {
-    // Cancelled by the caller (the page it was for is gone): not a failure to report.
-    if (signal?.aborted) {
-      throw cause;
+    let response: Response;
+    try {
+      response = await fetch(path, init);
+    } catch (cause) {
+      // Cancelled by the caller (the page it was for is gone): not a failure to report.
+      if (signal?.aborted) {
+        throw cause;
+      }
+      throw new ApiError('network');
     }
-    throw new ApiError('network');
-  }
 
-  if (!response.ok) {
-    throw new ApiError('http', { status: response.status, ...(await readErrorCodes(response)) });
-  }
-  if (response.status === 204) {
-    return undefined;
-  }
-  try {
-    return await response.json();
-  } catch {
-    throw new ApiError('invalid_response', { status: response.status });
+    if (!response.ok) {
+      throw new ApiError('http', { status: response.status, ...(await readErrorCodes(response)) });
+    }
+    if (response.status === 204) {
+      return undefined;
+    }
+    try {
+      return await response.json();
+    } catch {
+      throw new ApiError('invalid_response', { status: response.status });
+    }
+  } finally {
+    window.clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 }
 

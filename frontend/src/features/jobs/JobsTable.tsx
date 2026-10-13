@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Table } from 'antd';
+import { Alert, Button, Empty, Space, Table } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { memo } from 'react';
 
@@ -70,10 +70,13 @@ export type JobsTableProps = Readonly<{
   /** The list could not be loaded and there are no rows to show in its place. */
   failed: boolean;
   onRetry: () => void;
+  /** Leaves a later page that failed to load; `null` on the first page. */
+  onFirstPage: (() => void) | null;
 }>;
 
 /** The jobs on the current page. Paging is the parent's job (`CursorPager`), not the table's. */
-export const JobsTable = memo(function JobsTable({ jobs, loading, failed, onRetry }: JobsTableProps) {
+export const JobsTable = memo(function JobsTable(props: JobsTableProps) {
+  const { jobs, loading, failed, onRetry, onFirstPage } = props;
   return (
     <section aria-label="Jobs" aria-busy={loading}>
       <Table<Job>
@@ -83,19 +86,19 @@ export const JobsTable = memo(function JobsTable({ jobs, loading, failed, onRetr
         loading={loading}
         pagination={false}
         scroll={SCROLL}
-        locale={{ emptyText: emptyContent(loading, failed, onRetry) }}
+        locale={{ emptyText: emptyContent(loading, failed, onRetry, onFirstPage) }}
       />
     </section>
   );
 });
 
-function emptyContent(loading: boolean, failed: boolean, onRetry: () => void) {
+function emptyContent(loading: boolean, failed: boolean, onRetry: () => void, onFirstPage: (() => void) | null) {
   if (loading) {
     // Room for the spinner; "no jobs" would be a claim nobody has checked yet.
     return <div className="jobs-table__placeholder" />;
   }
   if (failed) {
-    return <LoadErrorAlert onRetry={onRetry} />;
+    return <LoadErrorAlert onRetry={onRetry} onFirstPage={onFirstPage} />;
   }
   return (
     <Empty
@@ -111,10 +114,15 @@ function emptyContent(loading: boolean, failed: boolean, onRetry: () => void) {
   );
 }
 
-export type LoadErrorAlertProps = Readonly<{ onRetry: () => void; className?: string }>;
+export type LoadErrorAlertProps = Readonly<{
+  onRetry: () => void;
+  /** Adds a "First page" button next to Retry; `null` leaves it out. */
+  onFirstPage: (() => void) | null;
+  className?: string;
+}>;
 
-/** "Couldn't load jobs" with a Retry button. */
-export function LoadErrorAlert({ onRetry, className }: LoadErrorAlertProps) {
+/** "Couldn't load jobs" with a Retry button, and a way back to the first page when given one. */
+export function LoadErrorAlert({ onRetry, onFirstPage, className }: LoadErrorAlertProps) {
   return (
     <Alert
       {...(className === undefined ? {} : { className })}
@@ -122,7 +130,12 @@ export function LoadErrorAlert({ onRetry, className }: LoadErrorAlertProps) {
       showIcon
       title="Couldn’t load jobs"
       description="Something went wrong while fetching the list. Check your connection and try again."
-      action={<Button onClick={onRetry}>Retry</Button>}
+      action={
+        <Space>
+          {onFirstPage !== null && <Button onClick={onFirstPage}>First page</Button>}
+          <Button onClick={onRetry}>Retry</Button>
+        </Space>
+      }
       style={LEFT_ALIGNED}
     />
   );

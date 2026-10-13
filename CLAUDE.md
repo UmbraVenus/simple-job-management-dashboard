@@ -86,7 +86,7 @@ The 4 hours is a guideline; the author decides any cuts.
 | Seed data | `seed_jobs` command: raw SQL, one statement, names from the row's own id; the one writer outside `services.py`. Ships in the runtime image; `make seed` runs it in the `make up` stack only. | A million ORM inserts take minutes; one `INSERT ... SELECT generate_series` takes about 30 s. One statement is atomic, so jobs and status rows stay in sync. `TODO` in the command: no guard against running it on a real database. |
 | Frontend serving | Multi-stage build; nginx serves static files and proxies `/api` to gunicorn | Production-shaped, single origin, no CORS config. |
 | Data fetching | TanStack Query | Invalidate-after-mutation makes "UI updates dynamically" correct and small. |
-| Design | Claude Design artifact `https://claude.ai/artifact/Ls7ujhaUPx8jruzymTSxLG` (board `Main` + 8 state boards). Built from it with: no web font (AntD system stack), primary `#0958d9`, error `#cf1322`. | The mockup loads Roboto from Google Fonts; the gate only promises Docker Hub, and a stylesheet that cannot load blocks rendering. AntD's default blue under white text is below WCAG AA. |
+| Design | Claude Design mockups, exported as PNGs in `AI_chats/design/` (the main board + 8 state boards; the original artifact was `https://claude.ai/artifact/Ls7ujhaUPx8jruzymTSxLG`). Built from it with: no web font (AntD system stack), primary `#0958d9`, error `#cf1322`. | The mockup loads Roboto from Google Fonts; the gate only promises Docker Hub, and a stylesheet that cannot load blocks rendering. AntD's default blue under white text is below WCAG AA. |
 | Status control | "Change status" button + AntD `Dropdown` menu (design option A). The current status is ticked and disabled. | Real `role=menu` / `menuitem`, so Playwright and screen readers find it by role and name; AntD `Select` is a virtualised combobox in a portal. The UI never sends a same-status PATCH (the API would log a duplicate row). |
 | Table columns | Name, Status, Created, Updated, Actions. Dates are relative labels with the full date as a tooltip. | Author's choice from the design. `useNow.ts` is one 30 s timer read through `useSyncExternalStore`, so a tick re-renders the time cells only. |
 | Pagers and range | Two `CursorPager`s (`nav` labelled "Pagination, top" / "Pagination, bottom") and a range text ("Showing 21–40"; the total only on the last page). | The range comes from the client's own page counter, since the API never counts; it can drift when other users add or delete jobs. Distinct `nav` labels let a test pick one `Next`. |
@@ -110,6 +110,9 @@ The 4 hours is a guideline; the author decides any cuts.
 ## Target layout
 
 ```
+README.md                     # reviewer's guide: commands, architecture, repo map, performance, AI usage
+TRADEOFFS.md  NEXT_STEPS.md   # major decisions with their cost; deferred work in priority order
+AI_chats/                     # chats/ (readable transcripts), sessions/ (raw), design/ (mockup PNGs), tools/
 Makefile                      # build, up, test, stop, clean (+ test-backend, seed, help)
 docker-compose.yml            # db, backend, frontend (+ e2e under a profile); no host ports
 docker-compose.override.yml   # host port for `make up` only (FRONTEND_PORT, default 8080)
@@ -434,7 +437,7 @@ rows (carried over from Phase 4).
 **Exit:** manual walkthrough of create / update / delete and each error state against `make up`
 (including stopping the backend container); `tsc --noEmit` clean in the image build.
 
-### [~] Phase 7 — E2E tests — built, awaiting author review
+### [x] Phase 7 — E2E tests
 1. Replace the smoke test with two tests:
    - create a job, see it listed as `PENDING`; change its status, see the new status, still there
      after a reload;
@@ -461,7 +464,7 @@ confirm the matching test goes red and `make test` exits non-zero.
 
 **Exit:** `make test` green 3 times in a row from a clean clone.
 
-### [ ] Phase 8 — README and final verification
+### [x] Phase 8 — README and final verification
 1. README: prerequisites; Makefile commands; short endpoint table; performance section
    (denormalized status, keyset pagination, no `COUNT`, what the index test proves, what would
    come next; the unique index on `name` is one more index checked on every insert); decisions and
@@ -471,6 +474,21 @@ confirm the matching test goes red and `make test` exits non-zero.
 2. Final audit against the criteria checklist at the top of this file.
 3. Fresh-clone rehearsal on macOS; on Linux too if available.
 4. Export the AI session transcripts before submitting.
+
+Built (differences from the list above):
+- Three files, at the author's request: `README.md` is a reviewer's guide (commands, architecture
+  diagrams, repo map, requirements map, API, performance, AI usage); decisions and their cost are
+  in `TRADEOFFS.md` (three main trade-offs in full, the rest as one-line "smaller calls"; the
+  full table stays here); deferred work is
+  in `NEXT_STEPS.md` (the main items only; the smaller ones are the `TODO` comments in code).
+- Transcripts are in the repo (`AI_chats/`), not behind a link.
+- Checked by Claude on a fresh clone of `f3ef36b` (2026-10-12), under a separate compose project
+  and port so the author's running stack was untouched: `make test` exit 0 twice (2 passed, 0
+  flaky); `make test-backend` 170 passed; in the browser: create, status change kept after a
+  reload, delete, backend stopped then Retry; `make seed` 1M in 45 s, Next about 50 ms per page;
+  `make stop` and `make clean` left no containers, networks or volumes.
+- "Time spent" is about 5 hours of build time, from the session timestamps with pauses over 10
+  minutes left out. Not checked: Linux.
 
 **Manual check (author), Phase 8:** follow the README word for word on a fresh clone, on Linux if
 possible; nothing may rely on knowledge that is not written down.

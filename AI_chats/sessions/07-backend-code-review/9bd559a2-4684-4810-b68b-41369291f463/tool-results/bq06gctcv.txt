@@ -1,0 +1,942 @@
+=== Dockerfile
+     1	# Three stages. `base` holds what both images share; `test` adds pytest and is
+     2	# built only by `make test-backend`; `runtime` is last so it is the default
+     3	# target and never contains test tooling.
+     4	FROM python:3.13-slim-bookworm AS base
+     5	
+     6	ENV PYTHONDONTWRITEBYTECODE=1 \
+     7	    PYTHONUNBUFFERED=1 \
+     8	    PIP_NO_CACHE_DIR=1 \
+     9	    PIP_DISABLE_PIP_VERSION_CHECK=1
+    10	
+    11	WORKDIR /app
+    12	
+    13	# Dependencies first: this layer is rebuilt only when requirements.txt changes,
+    14	# not on every source edit.
+    15	COPY requirements.txt .
+    16	RUN pip install -r requirements.txt
+    17	
+    18	RUN useradd --system --no-create-home app
+    19	
+    20	
+    21	FROM base AS test
+    22	
+    23	COPY requirements-dev.txt .
+    24	RUN pip install -r requirements-dev.txt
+    25	
+    26	COPY . .
+    27	USER app
+    28	
+    29	CMD ["pytest"]
+    30	
+    31	
+    32	FROM base AS runtime
+    33	
+    34	ENV WEB_CONCURRENCY=3
+    35	
+    36	COPY . .
+    37	USER app
+    38	
+    39	EXPOSE 8000
+    40	
+    41	# Inline command (no entrypoint script) so nothing depends on a file's
+    42	# executable bit or line endings surviving the clone.
+    43	# TODO: migrating on start is only safe with one backend replica; with several,
+    44	# run migrations as a separate one-off step before the rollout.
+    45	CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi:application --config gunicorn.conf.py --bind 0.0.0.0:8000 --access-logfile -"]
+=== .dockerignore
+     1	__pycache__/
+     2	*.py[cod]
+     3	.pytest_cache/
+     4	.venv/
+     5	venv/
+     6	.env
+     7	Dockerfile
+     8	.dockerignore
+=== config/settings.py
+     1	"""Django settings.
+     2	
+     3	Every value comes from an environment variable with a working default, so a
+     4	fresh clone runs without a .env file. docker-compose.yml sets the real values.
+     5	"""
+     6	import os
+     7	from pathlib import Path
+     8	
+     9	BASE_DIR = Path(__file__).resolve().parent.parent
+    10	
+    11	
+    12	def env_bool(name: str, default: bool) -> bool:
+    13	    """Read a boolean from the environment.
+    14	
+    15	    :param name: Environment variable name.
+    16	    :param default: Value used when the variable is not set.
+    17	    :returns: True for ``1``, ``true`` or ``yes`` (case-insensitive), else False.
+    18	    """
+    19	    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes"}
+    20	
+    21	
+    22	def env_list(name: str, default: str) -> list[str]:
+    23	    """Read a comma-separated list from the environment.
+    24	
+    25	    :param name: Environment variable name.
+    26	    :param default: Comma-separated value used when the variable is not set.
+    27	    :returns: The items with surrounding whitespace removed and blanks dropped.
+    28	    """
+    29	    return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
+    30	
+    31	
+    32	# TODO: no real secret management. The default key is public; a deployment must
+    33	# set DJANGO_SECRET_KEY. Nothing in this app signs data with it yet (no sessions).
+    34	SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "insecure-dev-only-key")
+    35	DEBUG = env_bool("DJANGO_DEBUG", False)
+    36	
+    37	# nginx forwards the browser's Host header, so the service name `frontend` must
+    38	# be allowed: inside the compose network the E2E browser calls http://frontend.
+    39	# Strict by default; docker-compose.yml relaxes it to "*" for local runs.
+    40	# TODO: no authentication or authorization. Anyone who can reach the app can
+    41	# create, change and delete jobs. Deferred: not in the brief. Fix: DRF
+    42	# authentication + permission classes, an owner FK on Job, and ALLOWED_HOSTS
+    43	# set to the real hostname(s).
+    44	ALLOWED_HOSTS = [
+    45	    *env_list("DJANGO_ALLOWED_HOSTS", "localhost,[::1],frontend"),
+    46	    # Always allowed: the container healthcheck calls http://127.0.0.1:8000, so
+    47	    # restricting the list through the environment must not make it unhealthy.
+    48	    "127.0.0.1",
+    49	]
+    50	
+    51	INSTALLED_APPS = [
+    52	    "django.contrib.contenttypes",
+    53	    "django.contrib.auth",
+    54	    "rest_framework",
+    55	    "jobs",
+    56	]
+    57	
+    58	REST_FRAMEWORK = {
+    59	    # JSON out only: no browsable HTML API.
+    60	    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    61	    # JSON in only. A form or text/plain POST is one a browser sends to another
+    62	    # origin without asking first (no CORS preflight), so with no login any web
+    63	    # page could create jobs here. Such a body now gets a 415.
+    64	    "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
+    65	    # No authentication (see the TODO at ALLOWED_HOSTS); stated, not implied.
+    66	    "DEFAULT_AUTHENTICATION_CLASSES": [],
+    67	    "DEFAULT_PERMISSION_CLASSES": [],
+    68	    # TODO: no request-size or rate limit of its own. DRF reads the body
+    69	    #  straight from the socket, so DATA_UPLOAD_MAX_MEMORY_SIZE does not apply;
+    70	    #  the only cap is nginx's default client_max_body_size (1 MB). Deferred:
+    71	    #  nothing to key a rate on without users. Fix: client_max_body_size on
+    72	    #  /api/ in nginx.conf, and DEFAULT_THROTTLE_CLASSES once auth exists.
+    73	    "EXCEPTION_HANDLER": "jobs.exceptions.exception_handler",
+    74	    "TEST_REQUEST_DEFAULT_FORMAT": "json",
+    75	}
+    76	
+    77	MIDDLEWARE = [
+    78	    "django.middleware.security.SecurityMiddleware",
+    79	    "django.middleware.common.CommonMiddleware",
+    80	]
+    81	
+    82	ROOT_URLCONF = "config.urls"
+    83	WSGI_APPLICATION = "config.wsgi.application"
+    84	
+    85	DATABASES = {
+    86	    "default": {
+    87	        "ENGINE": "django.db.backends.postgresql",
+    88	        "NAME": os.environ.get("POSTGRES_DB", "jobs"),
+    89	        "USER": os.environ.get("POSTGRES_USER", "jobs"),
+    90	        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "jobs"),
+    91	        "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
+    92	        "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+    93	        # Reuse connections between requests instead of reconnecting each time.
+    94	        "CONN_MAX_AGE": 60,
+    95	        "CONN_HEALTH_CHECKS": True,
+    96	    }
+    97	}
+    98	
+    99	DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+   100	
+   101	LANGUAGE_CODE = "en-us"
+   102	TIME_ZONE = "UTC"
+   103	USE_I18N = False
+   104	USE_TZ = True
+   105	
+   106	# With DEBUG off Django logs nothing to the console by default; containers
+   107	# should log to stdout/stderr so `docker compose logs` shows errors.
+   108	LOGGING = {
+   109	    "version": 1,
+   110	    "disable_existing_loggers": False,
+   111	    "formatters": {
+   112	        "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
+   113	    },
+   114	    "handlers": {
+   115	        "console": {"class": "logging.StreamHandler", "formatter": "plain"},
+   116	    },
+   117	    "root": {"handlers": ["console"], "level": os.environ.get("DJANGO_LOG_LEVEL", "INFO")},
+   118	}
+=== config/urls.py
+     1	from django.urls import include, path
+     2	
+     3	from config.views import health
+     4	
+     5	urlpatterns = [
+     6	    path("api/health/", health, name="health"),
+     7	    path("api/", include("jobs.urls")),
+     8	]
+=== config/views.py
+     1	import logging
+     2	
+     3	from django.db import Error as DatabaseError
+     4	from django.db import connection
+     5	from django.http import HttpRequest, JsonResponse
+     6	from django.views.decorators.http import require_GET
+     7	
+     8	logger = logging.getLogger(__name__)
+     9	
+    10	
+    11	@require_GET
+    12	def health(request: HttpRequest) -> JsonResponse:
+    13	    """Report whether this process can reach the database.
+    14	
+    15	    Used by the container healthcheck, so it must stay cheap.
+    16	
+    17	    :param request: The incoming GET request; its content is not used.
+    18	    :returns: 200 ``{"status": "ok"}`` when ``SELECT 1`` succeeds, otherwise
+    19	        503 ``{"status": "unavailable"}``.
+    20	    """
+    21	    try:
+    22	        with connection.cursor() as cursor:
+    23	            cursor.execute("SELECT 1")
+    24	    except DatabaseError:
+    25	        logger.exception("Health check failed: database unreachable")
+    26	        return JsonResponse({"status": "unavailable"}, status=503)
+    27	    return JsonResponse({"status": "ok"})
+=== config/wsgi.py
+     1	"""WSGI entry point: gunicorn imports `application` from here."""
+     2	import os
+     3	
+     4	from django.core.wsgi import get_wsgi_application
+     5	
+     6	os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+     7	
+     8	application = get_wsgi_application()
+=== gunicorn.conf.py
+     1	"""Gunicorn settings that do not fit on the command line (loaded with --config)."""
+     2	import logging
+     3	
+     4	HEALTH_PATH = "/api/health/"
+     5	
+     6	# Gunicorn's control socket (for its `gunicornc` admin tool) is created under
+     7	# the user's home directory. The `app` user has none, so every start logged
+     8	# "Control server error: Permission denied". Nothing here uses the socket.
+     9	control_socket_disable = True
+    10	
+    11	
+    12	class DropHealthyHealthChecks(logging.Filter):
+    13	    """Keep the container healthcheck, which calls every 2 seconds, out of the access log."""
+    14	
+    15	    def filter(self, record: logging.LogRecord) -> bool:
+    16	        """
+    17	        :param record: One access-log entry; ``record.args`` holds gunicorn's
+    18	            request fields (``U`` is the path, ``s`` the response status).
+    19	        :returns: False for a health check answered with 200, so it is not
+    20	            written. A failing health check is still logged.
+    21	        """
+    22	        return not (record.args["U"] == HEALTH_PATH and str(record.args["s"]) == "200")
+    23	
+    24	
+    25	logging.getLogger("gunicorn.access").addFilter(DropHealthyHealthChecks())
+=== jobs/exceptions.py
+     1	"""Error responses: every error carries a stable ``code`` next to its message.
+     2	
+     3	The frontend picks its display text by ``code``; the English ``message`` is for
+     4	logs and for people calling the API by hand, and can change without breaking a
+     5	client. Shapes::
+     6	
+     7	    {"name": [{"message": "...", "code": "blank"}]}            # a field
+     8	    {"detail": {"message": "Not found.", "code": "not_found"}}  # the request
+     9	"""
+    10	from typing import Any
+    11	
+    12	from django.http import Http404
+    13	from rest_framework import status
+    14	from rest_framework.exceptions import APIException, NotFound
+    15	from rest_framework.response import Response
+    16	from rest_framework.views import exception_handler as drf_exception_handler
+    17	
+    18	# TODO: an exception that is not an APIException (a bug, the database going
+    19	#  away) still gets Django's HTML 500, and a URL that matches no route gets its
+    20	#  HTML 404. Deferred: the frontend has to cope with non-JSON bodies anyway
+    21	#  (nginx answers 502 when the backend is down). Fix: return a JSON 500 / 503
+    22	#  here, and set handler404 in config/urls.py.
+    23	
+    24	
+    25	class Conflict(APIException):
+    26	    """The request is valid but collides with what is already stored."""
+    27	
+    28	    status_code = status.HTTP_409_CONFLICT
+    29	    default_detail = "The request conflicts with existing data."
+    30	    default_code = "conflict"
+    31	
+    32	
+    33	def exception_handler(exc: Exception, context: dict[str, Any]) -> Response | None:
+    34	    """Render an API error with codes; DRF's own handler renders messages only.
+    35	
+    36	    :param exc: The exception a view raised.
+    37	    :param context: The view, request and URL arguments, as DRF passes them.
+    38	    :returns: The error response, or ``None`` for an exception that is not an
+    39	        API error, which Django then turns into a 500.
+    40	    """
+    41	    if isinstance(exc, Http404):
+    42	        exc = NotFound()
+    43	    response = drf_exception_handler(exc, context)
+    44	    if response is not None and isinstance(exc, APIException):
+    45	        details = exc.get_full_details()
+    46	        response.data = details if isinstance(exc.detail, (list, dict)) else {"detail": details}
+    47	    return response
+=== jobs/ids.py
+     1	"""Recognising a job id in text that came from a URL."""
+     2	
+     3	# Job.id is a BigAutoField: a positive 64-bit integer.
+     4	MAX_JOB_ID = 2**63 - 1
+     5	
+     6	
+     7	def parse_job_id(text: str) -> int | None:
+     8	    """Read a job id written as plain decimal digits.
+     9	
+    10	    Stricter than ``int()``, which also accepts signs, spaces, underscores and
+    11	    non-ASCII digits, and nothing above the column's range is let through to a
+    12	    query.
+    13	
+    14	    :param text: A path segment or a cursor position.
+    15	    :returns: The id, or ``None`` if the text is not one a job could have.
+    16	    """
+    17	    if not (text.isascii() and text.isdigit()) or len(text) > len(str(MAX_JOB_ID)):
+    18	        return None
+    19	    job_id = int(text)
+    20	    return job_id if job_id <= MAX_JOB_ID else None
+=== jobs/models.py
+     1	"""Job and its append-only status log.
+     2	
+     3	Rules that must hold for every writer (API, management commands, raw SQL) are
+     4	database check constraints, because Django's ``choices`` and ``blank=False``
+     5	are only checked by forms and serializers, never by ``save()``.
+     6	"""
+     7	from django.db import models
+     8	from django.utils import timezone
+     9	
+    10	
+    11	# Named here because services.py recognises a duplicate name by this constraint.
+    12	JOB_NAME_UNIQUE_CONSTRAINT = "job_name_unique"
+    13	
+    14	
+    15	class StatusType(models.TextChoices):
+    16	    """The states a job can be in. Shared by ``Job`` and ``JobStatus``."""
+    17	
+    18	    PENDING = "PENDING", "Pending"
+    19	    RUNNING = "RUNNING", "Running"
+    20	    COMPLETED = "COMPLETED", "Completed"
+    21	    FAILED = "FAILED", "Failed"
+    22	
+    23	
+    24	class Job(models.Model):
+    25	    """A computational job."""
+    26	
+    27	    name = models.CharField(max_length=255)
+    28	    created_at = models.DateTimeField(auto_now_add=True)
+    29	    updated_at = models.DateTimeField(auto_now=True)
+    30	    # Copy of the newest JobStatus.status_type, so the job list is one indexed
+    31	    # query with no join against the status log.
+    32	    # TODO: the database does not force this to match the log; a Job can even
+    33	    #  exist with no JobStatus rows. Deferred: the only writers are the
+    34	    #  functions in services.py, which change both in one transaction.
+    35	    #  Fix: a trigger on jobs_jobstatus, or derive the value on read.
+    36	    current_status = models.CharField(
+    37	        max_length=16, choices=StatusType.choices, default=StatusType.PENDING
+    38	    )
+    39	
+    40	    class Meta:
+    41	        constraints = [
+    42	            models.CheckConstraint(
+    43	                condition=models.Q(current_status__in=StatusType.values),
+    44	                name="job_current_status_valid",
+    45	            ),
+    46	            # At least one non-whitespace character.
+    47	            models.CheckConstraint(
+    48	                condition=models.Q(name__regex=r"\S"),
+    49	                name="job_name_not_blank",
+    50	            ),
+    51	            # A retried create cannot make a second job. A named constraint
+    52	            # rather than unique=True, which on a CharField also builds a
+    53	            # LIKE index that nothing here uses.
+    54	            # TODO: "Job" and "job" count as two names. Deferred: exact match
+    55	            #  is enough to stop a retry. Fix: a unique index on Lower("name").
+    56	            models.UniqueConstraint(fields=["name"], name=JOB_NAME_UNIQUE_CONSTRAINT),
+    57	        ]
+    58	        # TODO: no (current_status, -id) index. Deferred: nothing filters by
+    59	        #  status yet and every index slows writes. Fix: add it together with
+    60	        #  the ?status= filter.
+    61	
+    62	    def __str__(self) -> str:
+    63	        """
+    64	        :returns: The job id and name, for logs and the Django shell.
+    65	        """
+    66	        return f"Job {self.pk}: {self.name}"
+    67	
+    68	
+    69	class JobStatus(models.Model):
+    70	    """One entry in a job's status log. Rows are only ever inserted."""
+    71	
+    72	    # CASCADE is carried out by Django (DELETE on this table, then on jobs_job,
+    73	    # in one transaction); the foreign key itself has no ON DELETE clause.
+    74	    # TODO: a raw SQL delete of a job that has statuses fails with a foreign
+    75	    #  key error instead of cascading. Deferred: the ORM is the only writer and
+    76	    #  Django 5.2 cannot declare it. Fix: ON DELETE CASCADE on the constraint.
+    77	    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="statuses")
+    78	    status_type = models.CharField(max_length=16, choices=StatusType.choices)
+    79	    timestamp = models.DateTimeField(default=timezone.now)
+    80	
+    81	    class Meta:
+    82	        constraints = [
+    83	            models.CheckConstraint(
+    84	                condition=models.Q(status_type__in=StatusType.values),
+    85	                name="jobstatus_status_type_valid",
+    86	            ),
+    87	        ]
+    88	        # TODO: no (job, -timestamp) index. Deferred: no status history view is
+    89	        #  specified, and the index Django creates on job_id already serves the
+    90	        #  cascade delete. Fix: add it together with the history endpoint.
+    91	
+    92	    def __str__(self) -> str:
+    93	        """
+    94	        :returns: The status and the id of the job it belongs to.
+    95	        """
+    96	        return f"{self.status_type} for job {self.job_id}"
+=== jobs/pagination.py
+     1	"""Cursor (keyset) pagination for the job list."""
+     2	from rest_framework.exceptions import NotFound
+     3	from rest_framework.pagination import Cursor, CursorPagination
+     4	from rest_framework.request import Request
+     5	
+     6	from jobs.ids import parse_job_id
+     7	
+     8	
+     9	class JobCursorPagination(CursorPagination):
+    10	    """Pages of 20 jobs, newest first.
+    11	
+    12	    Each page is ``WHERE id < <last id seen> ORDER BY id DESC LIMIT 21``: the
+    13	    same cost on the first page and the fifty-thousandth, and never a
+    14	    ``COUNT(*)``. The page size is fixed; the caller cannot raise it.
+    15	    """
+    16	
+    17	    page_size = 20
+    18	    # Unique, as cursor pagination needs, and already indexed (primary key).
+    19	    ordering = "-id"
+    20	
+    21	    def decode_cursor(self, request: Request) -> Cursor | None:
+    22	        """Refuse a cursor whose position is not a job id.
+    23	
+    24	        DRF checks the offset and the direction but passes the position to the
+    25	        query as it came, where text such as ``abc`` raises ``ValueError``: a
+    26	        500 from a URL anyone can type.
+    27	
+    28	        :param request: The list request.
+    29	        :returns: The decoded cursor, or ``None`` when the request has none.
+    30	        :raises NotFound: If the cursor cannot be decoded or its position is
+    31	            not a job id.
+    32	        """
+    33	        cursor = super().decode_cursor(request)
+    34	        if cursor is not None and cursor.position is not None and parse_job_id(cursor.position) is None:
+    35	            raise NotFound(self.invalid_cursor_message)
+    36	        return cursor
+=== jobs/serializers.py
+     1	"""What the API accepts and what it returns.
+     2	
+     3	The two input serializers repeat the rules of ``services.py`` so a bad body
+     4	gets a 400 that names the field. They declare one field each: anything else in
+     5	a body (``current_status``, ``id``, timestamps) is dropped, not written.
+     6	"""
+     7	from rest_framework import serializers
+     8	
+     9	from jobs.models import Job, StatusType
+    10	
+    11	
+    12	class JobSerializer(serializers.ModelSerializer):
+    13	    """A job as the API returns it. Output only."""
+    14	
+    15	    class Meta:
+    16	        model = Job
+    17	        fields = ["id", "name", "current_status", "created_at", "updated_at"]
+    18	        read_only_fields = fields
+    19	
+    20	
+    21	class JobCreateSerializer(serializers.Serializer):
+    22	    """Body of ``POST /api/jobs/``."""
+    23	
+    24	    # CharField trims first, then refuses blank, over-long, NUL-containing and
+    25	    # unencodable text. A number is accepted and stored as its text.
+    26	    name = serializers.CharField(max_length=Job._meta.get_field("name").max_length)
+    27	
+    28	
+    29	class StatusChangeSerializer(serializers.Serializer):
+    30	    """Body of ``PATCH /api/jobs/<id>/``."""
+    31	
+    32	    status_type = serializers.ChoiceField(choices=StatusType.choices)
+=== jobs/services.py
+     1	"""The only code that writes jobs.
+     2	
+     3	Every write keeps one invariant: ``Job.current_status`` equals the
+     4	``status_type`` of that job's newest ``JobStatus`` row. Each function validates
+     5	its own input, so it is safe to call without a serializer in front of it, and
+     6	runs in one transaction, so a failure half way leaves nothing behind.
+     7	"""
+     8	from django.db import IntegrityError, transaction
+     9	
+    10	from jobs.models import JOB_NAME_UNIQUE_CONSTRAINT, Job, JobStatus, StatusType
+    11	
+    12	# TODO: nothing here is logged; the gunicorn access log only shows the request.
+    13	#  Deferred: no logging setup exists yet. Fix: logger.info on a refused
+    14	#  duplicate name and on each status change.
+    15	
+    16	_NAME_MAX_LENGTH: int = Job._meta.get_field("name").max_length
+    17	
+    18	
+    19	class DuplicateJobName(Exception):
+    20	    """A job with this name already exists."""
+    21	
+    22	
+    23	def create_job(name: str) -> Job:
+    24	    """Create a job together with its initial ``PENDING`` status row.
+    25	
+    26	    :param name: The job's name; surrounding whitespace is removed.
+    27	    :returns: The saved job.
+    28	    :raises ValueError: If the name is not a string, is blank, contains a NUL
+    29	        character or a lone surrogate, or is longer than the column allows.
+    30	    :raises DuplicateJobName: If another job already has this name.
+    31	    """
+    32	    name = _clean_name(name)
+    33	    try:
+    34	        # No "does this name exist?" query first: two concurrent calls would
+    35	        # both see "no". The unique constraint decides, and this atomic block
+    36	        # is the savepoint that undoes the failed insert.
+    37	        with transaction.atomic():
+    38	            job = Job.objects.create(name=name)
+    39	            JobStatus.objects.create(job=job, status_type=job.current_status)
+    40	    except IntegrityError as exc:
+    41	        if _violated_constraint(exc) == JOB_NAME_UNIQUE_CONSTRAINT:
+    42	            raise DuplicateJobName(name) from exc
+    43	        raise
+    44	    return job
+    45	
+    46	
+    47	def change_status(job_id: int, status: str) -> Job:
+    48	    """Append a status row to a job's log and copy the status onto the job.
+    49	
+    50	    Any state may follow any state, including the current one; every call
+    51	    appends a row.
+    52	
+    53	    :param job_id: The id of the job to change.
+    54	    :param status: One of the ``StatusType`` values.
+    55	    :returns: The job, carrying the new ``current_status`` and ``updated_at``.
+    56	    :raises ValueError: If the status is not one of the ``StatusType`` values.
+    57	    :raises Job.DoesNotExist: If no job has this id.
+    58	    """
+    59	    new_status = _clean_status(status)
+    60	    with transaction.atomic():
+    61	        job = _lock_job(job_id)
+    62	        JobStatus.objects.create(job=job, status_type=new_status)
+    63	        job.current_status = new_status
+    64	        # updated_at must be listed: with update_fields, an auto_now field
+    65	        # that is not named is left out of the UPDATE.
+    66	        job.save(update_fields=["current_status", "updated_at"])
+    67	    return job
+    68	
+    69	
+    70	def delete_job(job_id: int) -> None:
+    71	    """Delete a job and its whole status log.
+    72	
+    73	    :param job_id: The id of the job to delete.
+    74	    :raises Job.DoesNotExist: If no job has this id.
+    75	    """
+    76	    with transaction.atomic():
+    77	        # Django's cascade is two statements: delete the statuses, then the
+    78	        # job. Without the lock, a status change committing between them makes
+    79	        # the second one fail on the foreign key.
+    80	        _lock_job(job_id).delete()
+    81	
+    82	
+    83	def _lock_job(job_id: int) -> Job:
+    84	    """Read a job and hold its row lock until the surrounding transaction ends.
+    85	
+    86	    Writers to the same job queue up here, so they run one after another.
+    87	
+    88	    :param job_id: The id of the job to lock.
+    89	    :returns: The job as it is once the lock is held.
+    90	    :raises Job.DoesNotExist: If no job has this id.
+    91	    """
+    92	    return Job.objects.select_for_update().get(pk=job_id)
+    93	
+    94	
+    95	def _clean_name(name: str) -> str:
+    96	    """
+    97	    :param name: The name as the caller passed it.
+    98	    :returns: The name without surrounding whitespace.
+    99	    :raises ValueError: If the name is not a string, is blank, contains a NUL
+   100	        character or a lone surrogate, or is longer than the column allows.
+   101	    """
+   102	    if not isinstance(name, str):
+   103	        raise ValueError("Job name must be a string.")
+   104	    if "\x00" in name:
+   105	        raise ValueError("Job name must not contain a NUL character.")
+   106	    try:
+   107	        name.encode()
+   108	    except UnicodeEncodeError:
+   109	        # Half of a surrogate pair: Python holds it, the database cannot.
+   110	        raise ValueError("Job name must be valid Unicode text.") from None
+   111	    name = name.strip()
+   112	    if not name:
+   113	        raise ValueError("Job name must not be blank.")
+   114	    if len(name) > _NAME_MAX_LENGTH:
+   115	        raise ValueError(f"Job name must be at most {_NAME_MAX_LENGTH} characters.")
+   116	    return name
+   117	
+   118	
+   119	def _clean_status(status: str) -> StatusType:
+   120	    """
+   121	    :param status: The status as the caller passed it.
+   122	    :returns: The matching ``StatusType`` member.
+   123	    :raises ValueError: If the status is not one of the ``StatusType`` values.
+   124	    """
+   125	    try:
+   126	        return StatusType(status)
+   127	    except ValueError:
+   128	        raise ValueError(f"Status must be one of: {', '.join(StatusType.values)}.") from None
+   129	
+   130	
+   131	def _violated_constraint(exc: IntegrityError) -> str | None:
+   132	    """
+   133	    :param exc: The error Django raised for a failed write.
+   134	    :returns: The name of the database constraint that was violated, as reported
+   135	        by the driver, or ``None`` if the driver did not report one.
+   136	    """
+   137	    diagnostics = getattr(exc.__cause__, "diag", None)
+   138	    return getattr(diagnostics, "constraint_name", None)
+=== jobs/urls.py
+     1	"""URLs of the jobs API: ``jobs/`` and ``jobs/<id>/``."""
+     2	from rest_framework.routers import SimpleRouter
+     3	
+     4	from jobs.views import JobViewSet
+     5	
+     6	# SimpleRouter, not DefaultRouter: no extra "API root" page.
+     7	router = SimpleRouter()
+     8	router.register("jobs", JobViewSet, basename="job")
+     9	
+    10	urlpatterns = router.urls
+=== jobs/views.py
+     1	"""The job endpoints. Views validate the body and call ``services.py``; they
+     2	never write a model themselves."""
+     3	from collections.abc import Iterator
+     4	from contextlib import contextmanager
+     5	
+     6	from rest_framework import mixins, status, viewsets
+     7	from rest_framework.exceptions import NotFound, ValidationError
+     8	from rest_framework.request import Request
+     9	from rest_framework.response import Response
+    10	from rest_framework.settings import api_settings
+    11	
+    12	from jobs.exceptions import Conflict
+    13	from jobs.ids import parse_job_id
+    14	from jobs.models import Job
+    15	from jobs.pagination import JobCursorPagination
+    16	from jobs.serializers import JobCreateSerializer, JobSerializer, StatusChangeSerializer
+    17	from jobs.services import DuplicateJobName, change_status, create_job, delete_job
+    18	
+    19	
+    20	class JobViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    21	    """List, create, change the status of, and delete jobs.
+    22	
+    23	    There is no ``retrieve`` and no ``update`` method, so GET and PUT on a
+    24	    single job answer 405.
+    25	    """
+    26	
+    27	    queryset = Job.objects.all()
+    28	    serializer_class = JobSerializer
+    29	    pagination_class = JobCursorPagination
+    30	
+    31	    def create(self, request: Request) -> Response:
+    32	        """Create a job; it starts as ``PENDING``.
+    33	
+    34	        :param request: Body ``{"name": "<text>"}``.
+    35	        :returns: 201 with the job.
+    36	        :raises ValidationError: 400 if the name is missing or invalid.
+    37	        :raises Conflict: 409 if another job has this name.
+    38	        """
+    39	        body = JobCreateSerializer(data=request.data)
+    40	        body.is_valid(raise_exception=True)
+    41	        with service_errors():
+    42	            job = create_job(body.validated_data["name"])
+    43	        return Response(JobSerializer(job).data, status=status.HTTP_201_CREATED)
+    44	
+    45	    def partial_update(self, request: Request, pk: str) -> Response:
+    46	        """Set a job's status. Every call appends to its log, the current status included.
+    47	
+    48	        :param request: Body ``{"status_type": "<STATUS>"}``.
+    49	        :param pk: The job id from the URL.
+    50	        :returns: 200 with the job.
+    51	        :raises ValidationError: 400 if the status is missing or not a known one.
+    52	        :raises NotFound: 404 if no job has this id.
+    53	        """
+    54	        body = StatusChangeSerializer(data=request.data)
+    55	        body.is_valid(raise_exception=True)
+    56	        with service_errors():
+    57	            job = change_status(_job_id(pk), body.validated_data["status_type"])
+    58	        return Response(JobSerializer(job).data)
+    59	
+    60	    def destroy(self, request: Request, pk: str) -> Response:
+    61	        """Delete a job and its status log.
+    62	
+    63	        :param request: The request; its body is not used.
+    64	        :param pk: The job id from the URL.
+    65	        :returns: 204 with no body.
+    66	        :raises NotFound: 404 if no job has this id.
+    67	        """
+    68	        with service_errors():
+    69	            delete_job(_job_id(pk))
+    70	        return Response(status=status.HTTP_204_NO_CONTENT)
+    71	
+    72	
+    73	@contextmanager
+    74	def service_errors() -> Iterator[None]:
+    75	    """Turn the errors a service raises into API errors.
+    76	
+    77	    Wrapped around the service call only. A handler for every ``ValueError``
+    78	    raised anywhere in a request would report bugs as the client's mistake.
+    79	
+    80	    :raises ValidationError: 400, for a ``ValueError``.
+    81	    :raises NotFound: 404, for ``Job.DoesNotExist``.
+    82	    :raises Conflict: 409, for ``DuplicateJobName``.
+    83	    """
+    84	    try:
+    85	        yield
+    86	    except ValueError as exc:
+    87	        # Reached only if a serializer and its service disagree on a rule.
+    88	        raise ValidationError({api_settings.NON_FIELD_ERRORS_KEY: [str(exc)]}) from exc
+    89	    except Job.DoesNotExist as exc:
+    90	        raise NotFound() from exc
+    91	    except DuplicateJobName as exc:
+    92	        raise Conflict({"name": ["A job with this name already exists."]}, code="duplicate") from exc
+    93	
+    94	
+    95	def _job_id(pk: str) -> int:
+    96	    """
+    97	    :param pk: The id segment of the URL, which the router accepts as any text.
+    98	    :returns: The job id.
+    99	    :raises NotFound: If the text is not an id a job could have.
+   100	    """
+   101	    job_id = parse_job_id(pk)
+   102	    if job_id is None:
+   103	        raise NotFound()
+   104	    return job_id
+=== jobs/migrations/0001_initial.py
+     1	# Generated by Django 5.2.18 on 2026-10-12 00:05
+     2	#
+     3	# Creates jobs_job and jobs_jobstatus. Generated from jobs/models.py; only the
+     4	# comments were added by hand. To see the SQL: `manage.py sqlmigrate jobs 0001`.
+     5	
+     6	import django.db.models.deletion
+     7	import django.utils.timezone
+     8	from django.db import migrations, models
+     9	
+    10	
+    11	class Migration(migrations.Migration):
+    12	
+    13	    initial = True
+    14	
+    15	    dependencies = [
+    16	    ]
+    17	
+    18	    operations = [
+    19	        # `choices`, `default` and `auto_now*` below are applied by Django in
+    20	        # Python; the columns get no database default. The check constraints
+    21	        # are what the database itself enforces.
+    22	        migrations.CreateModel(
+    23	            name='Job',
+    24	            fields=[
+    25	                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+    26	                ('name', models.CharField(max_length=255)),
+    27	                ('created_at', models.DateTimeField(auto_now_add=True)),
+    28	                ('updated_at', models.DateTimeField(auto_now=True)),
+    29	                ('current_status', models.CharField(choices=[('PENDING', 'Pending'), ('RUNNING', 'Running'), ('COMPLETED', 'Completed'), ('FAILED', 'Failed')], default='PENDING', max_length=16)),
+    30	            ],
+    31	            options={
+    32	                'constraints': [models.CheckConstraint(condition=models.Q(('current_status__in', ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'])), name='job_current_status_valid'), models.CheckConstraint(condition=models.Q(('name__regex', '\\S')), name='job_name_not_blank')],
+    33	            },
+    34	        ),
+    35	        # The foreign key also gets an index on job_id. Its CASCADE is carried
+    36	        # out by Django on delete; the constraint has no ON DELETE clause.
+    37	        migrations.CreateModel(
+    38	            name='JobStatus',
+    39	            fields=[
+    40	                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+    41	                ('status_type', models.CharField(choices=[('PENDING', 'Pending'), ('RUNNING', 'Running'), ('COMPLETED', 'Completed'), ('FAILED', 'Failed')], max_length=16)),
+    42	                ('timestamp', models.DateTimeField(default=django.utils.timezone.now)),
+    43	                ('job', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='statuses', to='jobs.job')),
+    44	            ],
+    45	            options={
+    46	                'constraints': [models.CheckConstraint(condition=models.Q(('status_type__in', ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'])), name='jobstatus_status_type_valid')],
+    47	            },
+    48	        ),
+    49	    ]
+=== jobs/migrations/0002_job_job_name_unique.py
+     1	# Generated by Django 5.2.18 on 2026-10-12 01:08
+     2	
+     3	from django.db import migrations, models
+     4	
+     5	
+     6	class Migration(migrations.Migration):
+     7	
+     8	    dependencies = [
+     9	        ('jobs', '0001_initial'),
+    10	    ]
+    11	
+    12	    operations = [
+    13	        migrations.AddConstraint(
+    14	            model_name='job',
+    15	            constraint=models.UniqueConstraint(fields=('name',), name='job_name_unique'),
+    16	        ),
+    17	    ]
+=== pytest.ini
+     1	[pytest]
+     2	DJANGO_SETTINGS_MODULE = config.settings
+     3	python_files = test_*.py
+     4	# no:cacheprovider: the container user cannot write .pytest_cache into /app.
+     5	# Migrations are left on, so the test database is built from the real
+     6	# migration files and the tests exercise the schema that ships.
+     7	addopts = -p no:cacheprovider --strict-markers
+=== requirements.txt
+     1	# Exact pins (direct + transitive) so every build installs the same versions.
+     2	Django==5.2.18
+     3	djangorestframework==3.18.3
+     4	gunicorn==26.2.0
+     5	psycopg[binary]==3.3.6
+     6	
+     7	# Transitive
+     8	asgiref==3.12.1
+     9	psycopg-binary==3.3.6
+    10	sqlparse==0.6.0
+=== requirements-dev.txt
+     1	# Test-only dependencies. Installed in the Dockerfile's `test` stage, never in
+     2	# the runtime image. Exact pins, resolved inside python:3.13-slim-bookworm.
+     3	-r requirements.txt
+     4	
+     5	pytest==9.1.1
+     6	pytest-django==4.14.0
+     7	
+     8	# Transitive
+     9	iniconfig==2.3.1
+    10	packaging==26.3
+    11	pluggy==1.6.0
+    12	Pygments==2.21.0
+=== jobs/tests/conftest.py
+     1	"""Fixtures shared by the backend tests."""
+     2	import threading
+     3	from collections.abc import Callable
+     4	from concurrent.futures import ThreadPoolExecutor
+     5	from typing import Any
+     6	
+     7	import pytest
+     8	from django.db import connection
+     9	from rest_framework.test import APIClient
+    10	
+    11	from jobs.models import Job
+    12	from jobs.services import create_job
+    13	
+    14	# A callable with its arguments already bound, and what one run of it produced:
+    15	# its return value, or the exception it raised.
+    16	Call = Callable[[], Any]
+    17	ThreadRunner = Callable[[list[Call]], list[Any]]
+    18	
+    19	BARRIER_TIMEOUT_SECONDS = 10
+    20	
+    21	
+    22	@pytest.fixture
+    23	def job(db: None) -> Job:
+    24	    """
+    25	    :param db: pytest-django's database access.
+    26	    :returns: A job made by ``create_job``, so it has its initial ``PENDING`` row.
+    27	    """
+    28	    return create_job("job")
+    29	
+    30	
+    31	@pytest.fixture
+    32	def other_job(db: None) -> Job:
+    33	    """
+    34	    :param db: pytest-django's database access.
+    35	    :returns: A second job, for checking that a write to one job leaves another alone.
+    36	    """
+    37	    return create_job("other job")
+    38	
+    39	
+    40	@pytest.fixture
+    41	def api_client() -> APIClient:
+    42	    """
+    43	    :returns: A test client that sends JSON bodies (``TEST_REQUEST_DEFAULT_FORMAT``) and calls
+    44	        the views in-process, without a server.
+    45	    """
+    46	    return APIClient()
+    47	
+    48	
+    49	@pytest.fixture
+    50	def run_in_threads() -> ThreadRunner:
+    51	    """
+    52	    :returns: A function that runs every given call in its own thread, all released at the
+    53	        same moment, and returns each call's result (or the exception it raised) in order.
+    54	    """
+    55	
+    56	    def run(calls: list[Call]) -> list[Any]:
+    57	        barrier = threading.Barrier(len(calls))
+    58	
+    59	        def worker(call: Call) -> Any:
+    60	            try:
+    61	                barrier.wait(timeout=BARRIER_TIMEOUT_SECONDS)
+    62	                return call()
+    63	            except Exception as exc:  # returned, so the test can assert on it
+    64	                return exc
+    65	            finally:
+    66	                # Each thread gets its own database connection; Django does not
+    67	                # close it when the thread ends.
+    68	                connection.close()
+    69	
+    70	        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+    71	            return list(pool.map(worker, calls))
+    72	
+    73	    return run
+=== jobs/tests/helpers.py
+     1	"""Assertions and constants shared by the backend tests."""
+     2	from jobs.models import Job, JobStatus
+     3	
+     4	# No job is ever given this id: the tests that use it create at most a few rows.
+     5	MISSING_JOB_ID = 999_999_999
+     6	
+     7	
+     8	def status_log(job: Job) -> list[str]:
+     9	    """
+    10	    :param job: The job whose log to read.
+    11	    :returns: The job's ``status_type`` values, oldest first (by ``id``).
+    12	    """
+    13	    return list(job.statuses.order_by("id").values_list("status_type", flat=True))
+    14	
+    15	
+    16	def assert_in_sync(job: Job) -> None:
+    17	    """Assert the invariant for one job, reading both tables fresh from the database.
+    18	
+    19	    The invariant: ``current_status`` equals the ``status_type`` of the job's
+    20	    newest ``JobStatus`` row, where newest means highest ``id``.
+    21	
+    22	    :param job: The job to check; its in-memory field values are ignored.
+    23	    :raises AssertionError: If the job has no status rows, or ``current_status``
+    24	        differs from the ``status_type`` of the row with the highest ``id``.
+    25	    """
+    26	    newest = JobStatus.objects.filter(job_id=job.pk).order_by("-id").first()
+    27	    assert newest is not None, f"job {job.pk} has no status rows"
+    28	
+    29	    current_status = Job.objects.values_list("current_status", flat=True).get(pk=job.pk)
+    30	    assert current_status == newest.status_type
